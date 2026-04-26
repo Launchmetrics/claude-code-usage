@@ -673,5 +673,56 @@ def test_init_db_scan_meta_idempotent(tmp_path):
     conn.close()
 
 
+def test_scan_writes_last_scan_at_to_scan_meta(tmp_path):
+    """After scan() completes, scan_meta should contain a last_scan_at row."""
+    import scanner
+    import time
+    db_path = tmp_path / "test.db"
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    # Empty projects dir — scan should still complete and write last_scan_at
+
+    before = time.time()
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    after = time.time()
+
+    conn = scanner.get_db(db_path)
+    row = conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None, "last_scan_at row missing from scan_meta"
+    ts = float(row["value"])
+    assert before <= ts <= after, f"last_scan_at {ts} outside [{before}, {after}]"
+
+
+def test_scan_updates_last_scan_at_on_repeat(tmp_path):
+    """Running scan() twice should update last_scan_at to the more recent time."""
+    import scanner
+    import time
+    db_path = tmp_path / "test.db"
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    conn = scanner.get_db(db_path)
+    first = float(conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone()["value"])
+    conn.close()
+
+    time.sleep(0.05)  # ensure measurable time delta
+
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    conn = scanner.get_db(db_path)
+    second = float(conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone()["value"])
+    conn.close()
+
+    assert second > first, f"last_scan_at did not advance: {first} -> {second}"
+
+
 if __name__ == "__main__":
     unittest.main()

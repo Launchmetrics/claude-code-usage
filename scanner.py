@@ -6,6 +6,7 @@ import json
 import os
 import glob
 import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -520,6 +521,12 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
         print(f"  Skipped files: {skipped_files}")
         print(f"  Turns added:   {total_turns}")
         print(f"  Sessions seen: {len(total_sessions)}")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO scan_meta (key, value) VALUES (?, ?)",
+        ("last_scan_at", str(time.time())),
+    )
+    conn.commit()
 
     conn.close()
     return {"new": new_files, "updated": updated_files, "skipped": skipped_files,
