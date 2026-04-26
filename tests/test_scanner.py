@@ -645,5 +645,123 @@ class TestParseJsonlFileLineCount(unittest.TestCase):
         self.assertEqual(line_count, 0)
 
 
+def test_init_db_creates_scan_meta_table(tmp_path):
+    """init_db should create a scan_meta table with key/value columns."""
+    import scanner
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+
+    # scan_meta should exist with expected columns
+    cols = conn.execute("PRAGMA table_info(scan_meta)").fetchall()
+    col_names = [c[1] for c in cols]
+    assert col_names == ["key", "value"], f"unexpected columns: {col_names}"
+
+    # key should be PRIMARY KEY
+    pk_cols = [c for c in cols if c[5] == 1]  # column 5 is `pk` flag
+    assert len(pk_cols) == 1 and pk_cols[0][1] == "key"
+    conn.close()
+
+
+def test_init_db_scan_meta_idempotent(tmp_path):
+    """Calling init_db twice should not raise (CREATE TABLE IF NOT EXISTS)."""
+    import scanner
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    scanner.init_db(conn)  # second call should be a no-op
+    conn.close()
+
+
+def test_scan_writes_last_scan_at_to_scan_meta(tmp_path):
+    """After scan() completes, scan_meta should contain a last_scan_at row."""
+    import scanner
+    import time
+    db_path = tmp_path / "test.db"
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    # Empty projects dir — scan should still complete and write last_scan_at
+
+    before = time.time()
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    after = time.time()
+
+    conn = scanner.get_db(db_path)
+    row = conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None, "last_scan_at row missing from scan_meta"
+    ts = float(row["value"])
+    assert before <= ts <= after, f"last_scan_at {ts} outside [{before}, {after}]"
+
+
+def test_scan_updates_last_scan_at_on_repeat(tmp_path):
+    """Running scan() twice should update last_scan_at to the more recent time."""
+    import scanner
+    import time
+    db_path = tmp_path / "test.db"
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    conn = scanner.get_db(db_path)
+    first = float(conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone()["value"])
+    conn.close()
+
+    time.sleep(0.05)  # ensure measurable time delta
+
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    conn = scanner.get_db(db_path)
+    second = float(conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone()["value"])
+    conn.close()
+
+    assert second > first, f"last_scan_at did not advance: {first} -> {second}"
+
+
+def test_scan_calls_progress_callback_per_file(tmp_path):
+    """progress_callback should be called once per file, with monotonically increasing done."""
+    import scanner
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    # Create three minimal JSONL files (empty is fine — scan still iterates them)
+    for i in range(3):
+        sub = projects_dir / f"proj{i}"
+        sub.mkdir()
+        (sub / f"session{i}.jsonl").write_text("")
+
+    db_path = tmp_path / "test.db"
+    calls = []
+    def cb(done, total):
+        calls.append((done, total))
+
+    scanner.scan(projects_dir=projects_dir, db_path=db_path,
+                 verbose=False, progress_callback=cb)
+
+    assert len(calls) == 3, f"expected 3 callback calls, got {len(calls)}"
+    assert [c[0] for c in calls] == [1, 2, 3], f"done values not monotonic: {calls}"
+    assert all(c[1] == 3 for c in calls), f"total values inconsistent: {calls}"
+
+
+def test_scan_without_callback_works_unchanged(tmp_path):
+    """scan() called without progress_callback should behave exactly as before."""
+    import scanner
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    db_path = tmp_path / "test.db"
+
+    # Should not raise
+    result = scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    assert "new" in result
+    assert "updated" in result
+
+
 if __name__ == "__main__":
     unittest.main()

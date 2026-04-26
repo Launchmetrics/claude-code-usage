@@ -5,11 +5,20 @@ dashboard.py - Local web dashboard served on localhost:8080.
 import json
 import os
 import sqlite3
+import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime
 
 DB_PATH = Path.home() / ".claude" / "usage.db"
+
+
+def _table_exists(conn, name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -110,14 +119,27 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    # ── Scan staleness signal ────────────────────────────────────────────────
+    last_scan_row = conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone() if _table_exists(conn, "scan_meta") else None
+    if last_scan_row:
+        last_scan_at = float(last_scan_row["value"])
+        data_age_seconds = max(0.0, time.time() - last_scan_at)
+    else:
+        last_scan_at = None
+        data_age_seconds = None
+
     conn.close()
 
     return {
-        "all_models":      all_models,
-        "daily_by_model":  daily_by_model,
-        "hourly_by_model": hourly_by_model,
-        "sessions_all":    sessions_all,
-        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":       all_models,
+        "daily_by_model":   daily_by_model,
+        "hourly_by_model":  hourly_by_model,
+        "sessions_all":     sessions_all,
+        "generated_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_scan_at":     last_scan_at,
+        "data_age_seconds": data_age_seconds,
     }
 
 
@@ -148,6 +170,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #rescan-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-top: 4px; }
   #rescan-btn:hover { color: var(--text); border-color: var(--accent); }
   #rescan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #stale-banner { display: none; background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.5); color: #fbbf24; padding: 10px 16px; border-radius: 6px; margin: 12px 0; font-size: 14px; align-items: center; gap: 12px; }
+  #stale-banner.visible { display: flex; }
+  #stale-banner button { background: rgba(251,191,36,0.2); border: 1px solid rgba(251,191,36,0.6); color: #fbbf24; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  #stale-banner button:hover { background: rgba(251,191,36,0.3); }
+  #stale-banner button:disabled { opacity: 0.5; cursor: not-allowed; }
 
   #filter-bar { background: var(--card); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .filter-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
@@ -227,6 +254,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
 </header>
 
+<div id="stale-banner">
+  <span>⚠ <span id="stale-banner-text">Last scan was a long time ago.</span> Recent Claude Code activity may not appear.</span>
+  <button id="stale-banner-rescan" onclick="rescanFromBanner()">Rescan now</button>
+</div>
+
 <div id="filter-bar">
   <div class="filter-label">Models</div>
   <div id="model-checkboxes"></div>
@@ -242,7 +274,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
     <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
     <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+    <button class="range-btn" data-range="custom" onclick="toggleCustomRangeForm()">Custom…</button>
   </div>
+</div>
+<div id="custom-range-form" style="display:none; gap:8px; align-items:center; font-size:13px; padding: 0 24px; margin-top:8px;">
+  <label>From: <input type="date" id="custom-from"></label>
+  <label>To: <input type="date" id="custom-to"></label>
+  <button onclick="applyCustomRange()" style="padding:4px 12px; background:var(--card); border:1px solid var(--border); color:var(--text); border-radius:4px; cursor:pointer;">Apply</button>
 </div>
 
 <div class="container">
@@ -481,14 +519,14 @@ const TOKEN_COLORS = {
 const MODEL_COLORS = ['#d97757','#4f8ef7','#4ade80','#a78bfa','#fbbf24','#f472b6','#34d399','#60a5fa'];
 
 // ── Time range ─────────────────────────────────────────────────────────────
-const RANGE_LABELS = { 'week': 'This Week', 'month': 'This Month', 'prev-month': 'Previous Month', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time' };
-const RANGE_TICKS  = { 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12 };
+const RANGE_LABELS = { 'week': 'This Week', 'month': 'This Month', 'prev-month': 'Previous Month', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom' };
+const RANGE_TICKS  = { 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12, 'custom': 15 };
 const VALID_RANGES = Object.keys(RANGE_LABELS);
 
 function rangeIncludesToday(range) {
   if (range === 'all') return true;
   const { start, end } = getRangeBounds(range);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocalISO();
   if (start && today < start) return false;
   if (end && today > end) return false;
   return true;
@@ -496,6 +534,17 @@ function rangeIncludesToday(range) {
 
 function getRangeBounds(range) {
   if (range === 'all') return { start: null, end: null };
+  if (range === 'custom') {
+    const params = new URLSearchParams(window.location.search);
+    let from = params.get('from');
+    let to   = params.get('to');
+    // Swap if reversed
+    if (from && to && from > to) [from, to] = [to, from];
+    // Clamp future from to today
+    const today = todayLocalISO();
+    if (from && from > today) from = today;
+    return { start: from || null, end: to || null };
+  }
   const today = new Date();
   const iso = d => d.toISOString().slice(0, 10);
   if (range === 'week') {
@@ -526,11 +575,51 @@ function readURLRange() {
   return VALID_RANGES.includes(p) ? p : '30d';
 }
 
+function toggleCustomRangeForm() {
+  const form = document.getElementById('custom-range-form');
+  const isHidden = form.style.display === 'none' || !form.style.display;
+  if (isHidden) {
+    const params = new URLSearchParams(window.location.search);
+    const fromInput = document.getElementById('custom-from');
+    const toInput   = document.getElementById('custom-to');
+    const today = todayLocalISO();
+    const thirtyAgo = (() => {
+      const d = new Date(); d.setDate(d.getDate() - 30);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    })();
+    fromInput.value = params.get('from') || thirtyAgo;
+    toInput.value   = params.get('to')   || today;
+    form.style.display = 'flex';
+  } else {
+    form.style.display = 'none';
+  }
+}
+
+function applyCustomRange() {
+  const from = document.getElementById('custom-from').value;
+  const to   = document.getElementById('custom-to').value;
+  if (!from || !to) return;
+  const url = new URL(window.location);
+  url.searchParams.set('range', 'custom');
+  url.searchParams.set('from', from);
+  url.searchParams.set('to', to);
+  history.replaceState(null, '', url);
+  setRange('custom');
+  const btn = document.querySelector('.range-btn[data-range="custom"]');
+  if (btn) btn.textContent = 'Custom: ' + from + RANGE_ARROW + to;
+}
+
 function setRange(range) {
   selectedRange = range;
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
   );
+  if (range !== 'custom') {
+    const form = document.getElementById('custom-range-form');
+    if (form) form.style.display = 'none';
+    const btn = document.querySelector('.range-btn[data-range="custom"]');
+    if (btn) btn.textContent = CUSTOM_LABEL;
+  }
   updateURL();
   applyFilter();
   scheduleAutoRefresh();
@@ -610,6 +699,14 @@ function updateURL() {
   const params = new URLSearchParams();
   if (selectedRange !== '30d') params.set('range', selectedRange);
   if (!isDefaultModelSelection(allModels)) params.set('models', Array.from(selectedModels).join(','));
+  // Preserve custom date params when range is custom
+  if (selectedRange === 'custom') {
+    const existing = new URLSearchParams(window.location.search);
+    const from = existing.get('from');
+    const to   = existing.get('to');
+    if (from) params.set('from', from);
+    if (to)   params.set('to',   to);
+  }
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
 }
@@ -1165,6 +1262,57 @@ function exportProjectBranchCSV() {
   downloadCSV('projects_by_branch', header, rows);
 }
 
+// ── Stale-data banner ──────────────────────────────────────────────────────
+function formatRelativeTime(seconds) {
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    return m === 1 ? '1 minute ago' : m + ' minutes ago';
+  }
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    return h === 1 ? '1 hour ago' : h + ' hours ago';
+  }
+  const d = Math.floor(seconds / 86400);
+  return d === 1 ? '1 day ago' : d + ' days ago';
+}
+
+const STALE_THRESHOLD_SECONDS = 86400;  // 24 hours
+const CUSTOM_LABEL = 'Custom\u2026';
+const RANGE_ARROW  = ' \u2192 ';
+
+function todayLocalISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function updateStaleBanner(dataAgeSeconds) {
+  const banner = document.getElementById('stale-banner');
+  const text = document.getElementById('stale-banner-text');
+  if (dataAgeSeconds == null || dataAgeSeconds < STALE_THRESHOLD_SECONDS) {
+    banner.classList.remove('visible');
+    return;
+  }
+  text.textContent = 'Last scan was ' + formatRelativeTime(dataAgeSeconds) + '.';
+  banner.classList.add('visible');
+}
+
+async function rescanFromBanner() {
+  const btn = document.getElementById('stale-banner-rescan');
+  btn.disabled = true;
+  btn.textContent = 'Rescanning\u2026';
+  try {
+    await fetch('/api/rescan', { method: 'POST' });
+    await loadData();  // refreshes data_age_seconds → updateStaleBanner hides banner
+  } catch (e) {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Rescan now'; }, 2000);
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Rescan now';
+}
+
 // ── Rescan ────────────────────────────────────────────────────────────────
 async function triggerRescan() {
   const btn = document.getElementById('rescan-btn');
@@ -1196,10 +1344,28 @@ async function loadData() {
 
     const isFirstLoad = rawData === null;
     rawData = d;
+    updateStaleBanner(d.data_age_seconds);
 
     if (isFirstLoad) {
       // Restore range from URL, mark active button
-      selectedRange = readURLRange();
+      const initialRange = readURLRange();
+      selectedRange = initialRange;
+      // Pre-populate custom range form if URL says ?range=custom&from=...&to=...
+      if (initialRange === 'custom') {
+        const params = new URLSearchParams(window.location.search);
+        const from = params.get('from');
+        const to   = params.get('to');
+        if (from && to) {
+          const fromInput = document.getElementById('custom-from');
+          const toInput   = document.getElementById('custom-to');
+          if (fromInput) fromInput.value = from;
+          if (toInput)   toInput.value   = to;
+          const form = document.getElementById('custom-range-form');
+          if (form) form.style.display = 'flex';
+          const btn = document.querySelector('.range-btn[data-range="custom"]');
+          if (btn) btn.textContent = 'Custom: ' + from + RANGE_ARROW + to;
+        }
+      }
       document.querySelectorAll('.range-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.range === selectedRange)
       );

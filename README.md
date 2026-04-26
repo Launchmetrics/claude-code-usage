@@ -69,6 +69,56 @@ python3 cli.py dashboard
 
 ---
 
+## Setup for non-technical users (macOS)
+
+If you've never used the Terminal before, follow these steps. They take about 5 minutes.
+
+### 1. Check that Python is installed
+
+1. Press `Cmd+Space`, type **Terminal**, press Enter. A black/white window opens.
+2. Paste this command and press Enter:
+   ```
+   python3 --version
+   ```
+3. You should see something like `Python 3.11.4`. Anything 3.8 or higher is fine.
+4. If you see `command not found: python3`, install Python from [python.org/downloads](https://www.python.org/downloads/) (pick the macOS installer), then come back to step 2.
+
+### 2. Install and run the dashboard
+
+In the same Terminal window, paste these commands one at a time. Each one may take a few seconds.
+
+```
+git clone https://github.com/Launchmetrics/claude-code-usage
+cd claude-code-usage
+python3 cli.py dashboard
+```
+
+The first run will scan your Claude Code history. This takes a few seconds for light users and several minutes if you've been using Claude Code heavily — you'll see progress in the Terminal as files are processed.
+
+When it's done, your browser opens automatically to `http://localhost:8080` showing the dashboard.
+
+### 3. If something goes wrong
+
+| Error message | Fix |
+|---|---|
+| `command not found: git` | Run `xcode-select --install` and click "Install" when the popup appears. Then retry. |
+| `command not found: python3` | Install Python from [python.org/downloads](https://www.python.org/downloads/). |
+| `Address already in use` | Another program is using port 8080. Run with a different port: `PORT=9000 python3 cli.py dashboard` |
+| Browser doesn't open automatically | Open it manually and go to `http://localhost:8080` |
+
+### 4. Running it again later
+
+Open Terminal and run:
+
+```
+cd claude-code-usage
+python3 cli.py dashboard
+```
+
+The dashboard will pick up any new Claude Code activity automatically.
+
+---
+
 ## Usage
 
 > On macOS/Linux, use `python3` instead of `python` in all commands below.
