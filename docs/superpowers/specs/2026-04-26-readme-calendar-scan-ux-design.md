@@ -210,22 +210,51 @@ One new SQLite table (`scan_meta`). No new dependencies. No new HTTP endpoints.
 
 ## Testing
 
-- **Feature 1:** Manual — have a non-technical colleague follow the README cold.
-- **Feature 2:**
-  - Unit-ish: assert `getRangeBounds('custom')` returns the from/to from URL.
-  - Manual: pick custom range, verify all charts and tables filter correctly, bookmark URL, reload, verify range restored.
-  - Edge cases: From > To, empty fields, future dates.
-- **Feature 3:**
-  - Unit: `scanner.scan(..., progress_callback=mock)` → mock called N times for N files, with monotonically increasing `done`.
-  - Manual: run `python3 cli.py scan` on real history, verify in-place updates render correctly in iTerm/Terminal.app.
-  - Manual: pipe to file (`python3 cli.py scan 2>scan.log`) — verify periodic log lines, no carriage-return junk.
-- **Feature 4:**
-  - Unit: after `scanner.scan()` runs, `scan_meta` table contains a `last_scan_at` row with a value within a few seconds of `time.time()`.
-  - Unit: `/api/stats` returns `last_scan_at` and `data_age_seconds` correctly.
-  - Manual: artificially age the DB (`UPDATE scan_meta SET value = '<old timestamp>'`), reload dashboard, verify yellow banner appears with correct phrasing. Click "Rescan now", verify banner disappears after scan completes.
-  - Manual: brand-new DB (no `scan_meta` row) → no banner.
+New automated tests are added to the existing test files (`tests/test_scanner.py`, `tests/test_dashboard.py`, `tests/test_cli.py`). No new test files are created. Tests are written test-first during implementation. The existing 91-test suite must continue to pass.
 
-Existing 91-test suite must continue to pass.
+### Feature 1 — README setup section
+- **Manual only.** No automated tests (it's documentation). Acceptance: a non-technical colleague follows the README cold and reaches a working dashboard without help.
+
+### Feature 2 — Custom date range
+**New tests in `tests/test_dashboard.py`:**
+- `test_get_range_bounds_custom_returns_from_to_from_query`: simulate a request with `?range=custom&from=2026-04-01&to=2026-04-15`, assert the server-side filter applied to charts/tables uses those bounds.
+  - Note: `getRangeBounds` itself is JS in the embedded HTML and not directly unit-testable from Python. The server-observable behavior (filtered API responses) is what we test.
+- `test_custom_range_swaps_when_from_after_to`: `?range=custom&from=2026-04-15&to=2026-04-01` → response same as if `from`/`to` were swapped.
+- `test_custom_range_clamps_future_from_to_today`: `?range=custom&from=<future>&to=<future>` → server returns empty result set (or clamps to today; behavior to confirm during implementation).
+- `test_custom_range_missing_from_or_to_falls_back_to_default`: malformed `?range=custom` (no from/to) → server falls back to default range without error.
+
+**Manual:**
+- Click "Custom…", pick a range, click Apply. Verify all charts and tables filter correctly.
+- Bookmark the URL with `?range=custom&from=…&to=…`, reload, verify range restored and form pre-populated.
+
+### Feature 3 — Scan progress
+**New tests in `tests/test_scanner.py`:**
+- `test_scan_calls_progress_callback_per_file`: pass a mock callback, scan a fixture directory with N files, assert the callback was called exactly N times with `(done, total)` where `done` increases monotonically from 1 to N and `total == N`.
+- `test_scan_with_no_callback_works_unchanged`: existing behavior — calling `scan()` without `progress_callback` still works (backwards compatibility).
+
+**New tests in `tests/test_cli.py`:**
+- `test_cmd_scan_writes_progress_to_stderr`: capture stderr, run `cmd_scan` against a fixture, assert progress lines appear (e.g. matches `Scanning… \d+ / \d+ files`).
+- `test_cmd_scan_non_tty_stderr_skips_carriage_return_updates`: redirect stderr to a non-TTY buffer, assert output uses newline-separated lines (no `\r`).
+
+**Manual:**
+- Run `python3 cli.py scan` on real history; verify in-place line updates render correctly in iTerm and Terminal.app.
+- Pipe stderr to a file (`python3 cli.py scan 2>scan.log`); verify periodic log lines and no carriage-return artifacts.
+
+### Feature 4 — Stale-data banner
+**New tests in `tests/test_scanner.py`:**
+- `test_scan_writes_last_scan_at_to_scan_meta`: after `scan()` completes, query `scan_meta` table, assert `last_scan_at` row exists and value is within a few seconds of `time.time()`.
+- `test_scan_meta_table_created_if_missing`: open a DB without `scan_meta`, run `scan()`, assert the table is created (migration behavior).
+- `test_repeat_scan_updates_last_scan_at`: run `scan()` twice with a small sleep; assert second `last_scan_at` is greater than first.
+
+**New tests in `tests/test_dashboard.py`:**
+- `test_api_stats_includes_last_scan_at_and_data_age_seconds`: hit `/api/stats`, assert response contains both fields with sensible types.
+- `test_api_stats_returns_null_last_scan_at_when_missing`: with a fresh DB lacking `scan_meta`, `/api/stats` returns `last_scan_at: null` (no error).
+- `test_api_stats_clamps_negative_data_age_to_zero`: write a future `last_scan_at` to `scan_meta`, hit `/api/stats`, assert `data_age_seconds == 0`.
+
+**Manual:**
+- Artificially age the DB (`UPDATE scan_meta SET value = '<old timestamp>' WHERE key = 'last_scan_at'`), reload dashboard, verify yellow banner appears with the expected phrasing.
+- Click "Rescan now" in the banner, wait for scan to complete, verify banner disappears.
+- Brand-new DB (no `scan_meta` row) → no banner shown.
 
 ---
 
