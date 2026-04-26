@@ -79,9 +79,39 @@ def require_db():
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-def cmd_scan(projects_dir=None):
-    from scanner import scan
-    scan(projects_dir=Path(projects_dir) if projects_dir else None)
+def cmd_scan(projects_dir=None, db_path=None):
+    import scanner
+    import sys
+
+    is_tty = sys.stderr.isatty()
+
+    def progress(done, total):
+        if is_tty:
+            pct = (100 * done // total) if total else 100
+            sys.stderr.write(f"\rScanning… {done} / {total} files ({pct}%)")
+            sys.stderr.flush()
+        else:
+            # Non-TTY: log every 50 files (and first/last)
+            if done == 1 or done == total or done % 50 == 0:
+                sys.stderr.write(f"Scanning… {done} / {total} files\n")
+
+    kwargs = dict(
+        projects_dir=Path(projects_dir) if projects_dir else None,
+        progress_callback=progress,
+        verbose=False,
+    )
+    if db_path is not None:
+        kwargs["db_path"] = db_path
+
+    result = scanner.scan(**kwargs)
+
+    if is_tty:
+        sys.stderr.write("\n")  # clear the in-place line before final summary
+    sys.stderr.write(
+        f"Done. {result['new']} new, {result['updated']} updated, "
+        f"{result['skipped']} skipped, {result['turns']} turns.\n"
+    )
+    return result
 
 
 def cmd_today():

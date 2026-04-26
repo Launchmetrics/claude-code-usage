@@ -166,3 +166,58 @@ class TestPricingConsistency(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── pytest-style tests for cmd_scan progress callback ─────────────────────────
+
+def test_cmd_scan_progress_callback_writes_in_place_to_stderr(tmp_path, capsys, monkeypatch):
+    """When stderr is a TTY, progress should use carriage returns."""
+    import cli
+    import scanner
+    import io
+    import sys
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    for i in range(2):
+        sub = projects_dir / f"p{i}"
+        sub.mkdir()
+        (sub / f"s{i}.jsonl").write_text("")
+
+    db_path = tmp_path / "test.db"
+
+    class FakeTTY(io.StringIO):
+        def isatty(self): return True
+    fake_err = FakeTTY()
+    monkeypatch.setattr("sys.stderr", fake_err)
+
+    cli.cmd_scan(projects_dir=projects_dir, db_path=db_path)
+
+    output = fake_err.getvalue()
+    assert "\r" in output, f"expected carriage return in stderr output: {output!r}"
+    assert "Scanning" in output, f"expected 'Scanning' in stderr output: {output!r}"
+
+
+def test_cmd_scan_progress_non_tty_uses_newlines(tmp_path, monkeypatch):
+    """When stderr is not a TTY, progress should use newlines (no carriage returns)."""
+    import cli
+    import io
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    for i in range(60):  # > 50 files so periodic logging triggers
+        sub = projects_dir / f"p{i}"
+        sub.mkdir()
+        (sub / f"s{i}.jsonl").write_text("")
+
+    db_path = tmp_path / "test.db"
+
+    class FakeNonTTY(io.StringIO):
+        def isatty(self): return False
+    fake_err = FakeNonTTY()
+    monkeypatch.setattr("sys.stderr", fake_err)
+
+    cli.cmd_scan(projects_dir=projects_dir, db_path=db_path)
+
+    output = fake_err.getvalue()
+    assert "\r" not in output, f"non-TTY output should not contain carriage returns: {output!r}"
