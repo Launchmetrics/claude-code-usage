@@ -274,7 +274,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
     <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
     <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+    <button class="range-btn" data-range="custom" onclick="toggleCustomRangeForm()">Custom…</button>
   </div>
+</div>
+<div id="custom-range-form" style="display:none; gap:8px; align-items:center; font-size:13px; padding: 0 24px; margin-top:8px;">
+  <label>From: <input type="date" id="custom-from"></label>
+  <label>To: <input type="date" id="custom-to"></label>
+  <button onclick="applyCustomRange()" style="padding:4px 12px; background:var(--card); border:1px solid var(--border); color:var(--text); border-radius:4px; cursor:pointer;">Apply</button>
 </div>
 
 <div class="container">
@@ -513,8 +519,8 @@ const TOKEN_COLORS = {
 const MODEL_COLORS = ['#d97757','#4f8ef7','#4ade80','#a78bfa','#fbbf24','#f472b6','#34d399','#60a5fa'];
 
 // ── Time range ─────────────────────────────────────────────────────────────
-const RANGE_LABELS = { 'week': 'This Week', 'month': 'This Month', 'prev-month': 'Previous Month', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time' };
-const RANGE_TICKS  = { 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12 };
+const RANGE_LABELS = { 'week': 'This Week', 'month': 'This Month', 'prev-month': 'Previous Month', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom' };
+const RANGE_TICKS  = { 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12, 'custom': 15 };
 const VALID_RANGES = Object.keys(RANGE_LABELS);
 
 function rangeIncludesToday(range) {
@@ -528,6 +534,17 @@ function rangeIncludesToday(range) {
 
 function getRangeBounds(range) {
   if (range === 'all') return { start: null, end: null };
+  if (range === 'custom') {
+    const params = new URLSearchParams(window.location.search);
+    let from = params.get('from');
+    let to   = params.get('to');
+    // Swap if reversed
+    if (from && to && from > to) [from, to] = [to, from];
+    // Clamp future from to today
+    const today = new Date().toISOString().slice(0, 10);
+    if (from && from > today) from = today;
+    return { start: from || null, end: to || null };
+  }
   const today = new Date();
   const iso = d => d.toISOString().slice(0, 10);
   if (range === 'week') {
@@ -556,6 +573,40 @@ function getRangeBounds(range) {
 function readURLRange() {
   const p = new URLSearchParams(window.location.search).get('range');
   return VALID_RANGES.includes(p) ? p : '30d';
+}
+
+function toggleCustomRangeForm() {
+  const form = document.getElementById('custom-range-form');
+  const isHidden = form.style.display === 'none' || !form.style.display;
+  if (isHidden) {
+    const params = new URLSearchParams(window.location.search);
+    const fromInput = document.getElementById('custom-from');
+    const toInput   = document.getElementById('custom-to');
+    const today = new Date().toISOString().slice(0, 10);
+    const thirtyAgo = (() => {
+      const d = new Date(); d.setDate(d.getDate() - 30);
+      return d.toISOString().slice(0, 10);
+    })();
+    fromInput.value = params.get('from') || thirtyAgo;
+    toInput.value   = params.get('to')   || today;
+    form.style.display = 'flex';
+  } else {
+    form.style.display = 'none';
+  }
+}
+
+function applyCustomRange() {
+  const from = document.getElementById('custom-from').value;
+  const to   = document.getElementById('custom-to').value;
+  if (!from || !to) return;
+  const url = new URL(window.location);
+  url.searchParams.set('range', 'custom');
+  url.searchParams.set('from', from);
+  url.searchParams.set('to', to);
+  history.replaceState(null, '', url);
+  setRange('custom');
+  const btn = document.querySelector('.range-btn[data-range="custom"]');
+  if (btn) btn.textContent = 'Custom: ' + from + ' \u2192 ' + to;
 }
 
 function setRange(range) {
@@ -642,6 +693,14 @@ function updateURL() {
   const params = new URLSearchParams();
   if (selectedRange !== '30d') params.set('range', selectedRange);
   if (!isDefaultModelSelection(allModels)) params.set('models', Array.from(selectedModels).join(','));
+  // Preserve custom date params when range is custom
+  if (selectedRange === 'custom') {
+    const existing = new URLSearchParams(window.location.search);
+    const from = existing.get('from');
+    const to   = existing.get('to');
+    if (from) params.set('from', from);
+    if (to)   params.set('to',   to);
+  }
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
 }
@@ -1276,7 +1335,24 @@ async function loadData() {
 
     if (isFirstLoad) {
       // Restore range from URL, mark active button
-      selectedRange = readURLRange();
+      const initialRange = readURLRange();
+      selectedRange = initialRange;
+      // Pre-populate custom range form if URL says ?range=custom&from=...&to=...
+      if (initialRange === 'custom') {
+        const params = new URLSearchParams(window.location.search);
+        const from = params.get('from');
+        const to   = params.get('to');
+        if (from && to) {
+          const fromInput = document.getElementById('custom-from');
+          const toInput   = document.getElementById('custom-to');
+          if (fromInput) fromInput.value = from;
+          if (toInput)   toInput.value   = to;
+          const form = document.getElementById('custom-range-form');
+          if (form) form.style.display = 'flex';
+          const btn = document.querySelector('.range-btn[data-range="custom"]');
+          if (btn) btn.textContent = 'Custom: ' + from + ' \u2192 ' + to;
+        }
+      }
       document.querySelectorAll('.range-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.range === selectedRange)
       );

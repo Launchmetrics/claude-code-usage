@@ -321,5 +321,22 @@ def test_api_data_clamps_negative_data_age_to_zero(tmp_path):
     assert data["data_age_seconds"] == 0
 
 
+def test_get_dashboard_data_handles_custom_range(tmp_path):
+    """get_dashboard_data should be range-agnostic (server returns full data; JS filters)."""
+    import dashboard
+    import scanner
+
+    db_path = tmp_path / "test.db"
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+
+    data = dashboard.get_dashboard_data(db_path=db_path)
+    # Custom range is purely a client-side concept — server returns same shape regardless.
+    assert "all_models" in data
+    assert "daily_by_model" in data
+    assert "sessions_all" in data
+
+
 if __name__ == "__main__":
     unittest.main()
