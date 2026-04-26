@@ -170,6 +170,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #rescan-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-top: 4px; }
   #rescan-btn:hover { color: var(--text); border-color: var(--accent); }
   #rescan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #stale-banner { display: none; background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.5); color: #fbbf24; padding: 10px 16px; border-radius: 6px; margin: 12px 0; font-size: 14px; align-items: center; gap: 12px; }
+  #stale-banner.visible { display: flex; }
+  #stale-banner button { background: rgba(251,191,36,0.2); border: 1px solid rgba(251,191,36,0.6); color: #fbbf24; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  #stale-banner button:hover { background: rgba(251,191,36,0.3); }
+  #stale-banner button:disabled { opacity: 0.5; cursor: not-allowed; }
 
   #filter-bar { background: var(--card); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .filter-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
@@ -256,6 +261,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button class="filter-btn" onclick="clearAllModels()">None</button>
   <div class="filter-sep"></div>
   <div class="filter-label">Range</div>
+  <div id="stale-banner">
+    <span>⚠ <span id="stale-banner-text">Last scan was a long time ago.</span> Recent Claude Code activity may not appear.</span>
+    <button id="stale-banner-rescan" onclick="rescanFromBanner()">Rescan now</button>
+  </div>
   <div class="range-group">
     <button class="range-btn" data-range="week" onclick="setRange('week')">This Week</button>
     <button class="range-btn" data-range="month" onclick="setRange('month')">This Month</button>
@@ -1187,6 +1196,50 @@ function exportProjectBranchCSV() {
   downloadCSV('projects_by_branch', header, rows);
 }
 
+// ── Stale-data banner ──────────────────────────────────────────────────────
+function formatRelativeTime(seconds) {
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    return m === 1 ? '1 minute ago' : m + ' minutes ago';
+  }
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    return h === 1 ? '1 hour ago' : h + ' hours ago';
+  }
+  const d = Math.floor(seconds / 86400);
+  return d === 1 ? '1 day ago' : d + ' days ago';
+}
+
+const STALE_THRESHOLD_SECONDS = 86400;  // 24 hours
+
+function updateStaleBanner(dataAgeSeconds) {
+  const banner = document.getElementById('stale-banner');
+  const text = document.getElementById('stale-banner-text');
+  if (dataAgeSeconds == null || dataAgeSeconds < STALE_THRESHOLD_SECONDS) {
+    banner.classList.remove('visible');
+    return;
+  }
+  text.textContent = 'Last scan was ' + formatRelativeTime(dataAgeSeconds) + '.';
+  banner.classList.add('visible');
+}
+
+async function rescanFromBanner() {
+  const btn = document.getElementById('stale-banner-rescan');
+  btn.disabled = true;
+  btn.textContent = 'Rescanning\u2026';
+  try {
+    await fetch('/api/rescan', { method: 'POST' });
+    await loadData();  // refreshes data_age_seconds → updateStaleBanner hides banner
+  } catch (e) {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Rescan now'; }, 2000);
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Rescan now';
+}
+
 // ── Rescan ────────────────────────────────────────────────────────────────
 async function triggerRescan() {
   const btn = document.getElementById('rescan-btn');
@@ -1218,6 +1271,7 @@ async function loadData() {
 
     const isFirstLoad = rawData === null;
     rawData = d;
+    updateStaleBanner(d.data_age_seconds);
 
     if (isFirstLoad) {
       // Restore range from URL, mark active button
