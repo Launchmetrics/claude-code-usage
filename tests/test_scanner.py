@@ -724,5 +724,44 @@ def test_scan_updates_last_scan_at_on_repeat(tmp_path):
     assert second > first, f"last_scan_at did not advance: {first} -> {second}"
 
 
+def test_scan_calls_progress_callback_per_file(tmp_path):
+    """progress_callback should be called once per file, with monotonically increasing done."""
+    import scanner
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    # Create three minimal JSONL files (empty is fine — scan still iterates them)
+    for i in range(3):
+        sub = projects_dir / f"proj{i}"
+        sub.mkdir()
+        (sub / f"session{i}.jsonl").write_text("")
+
+    db_path = tmp_path / "test.db"
+    calls = []
+    def cb(done, total):
+        calls.append((done, total))
+
+    scanner.scan(projects_dir=projects_dir, db_path=db_path,
+                 verbose=False, progress_callback=cb)
+
+    assert len(calls) == 3, f"expected 3 callback calls, got {len(calls)}"
+    assert [c[0] for c in calls] == [1, 2, 3], f"done values not monotonic: {calls}"
+    assert all(c[1] == 3 for c in calls), f"total values inconsistent: {calls}"
+
+
+def test_scan_without_callback_works_unchanged(tmp_path):
+    """scan() called without progress_callback should behave exactly as before."""
+    import scanner
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    db_path = tmp_path / "test.db"
+
+    # Should not raise
+    result = scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+    assert "new" in result
+    assert "updated" in result
+
+
 if __name__ == "__main__":
     unittest.main()
