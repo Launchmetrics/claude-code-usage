@@ -1,4 +1,4 @@
-# Design: README clarity, custom date range, scan progress
+# Design: README clarity, custom date range, scan progress, stale-data banner
 
 **Date:** 2026-04-26
 **Author:** Pau Montero (pau.montero@launchmetrics.com)
@@ -11,6 +11,7 @@ The Launchmetrics fork of `claude-code-usage` is being shared with colleagues ac
 1. **Setup is intimidating for non-technical colleagues.** The README assumes comfort with terminals, `git`, and Python. New users need a more guided path.
 2. **The preset date ranges (Week / Month / 7d / 30d / 90d / All) don't cover every question.** "How much did we spend last quarter?" or "Show me last week (Mon–Fri)" requires arbitrary date picking.
 3. **First scan is slow and silent.** `cli.py scan` can take several minutes for a heavy user's history. Currently it prints nothing until done, so users wonder if it hung.
+4. **Stale data is invisible.** The dashboard's 30-second auto-refresh re-queries the DB but does NOT re-read JSONL files. If a user leaves the dashboard open for hours/days while continuing to use Claude Code, the numbers silently drift behind reality. The Rescan button exists but isn't visually called out.
 
 Constraints carried from upstream:
 - Pure stdlib (no `pip install`, no virtualenv).
@@ -140,16 +141,70 @@ These are deferred until colleagues actually report the empty-dashboard-during-f
 
 ---
 
+## Feature 4: Stale-data banner
+
+### Goal
+When dashboard data is older than 24 hours, surface a clear warning so users know to rescan. Replaces what would otherwise be a documentation note in the README.
+
+### Behavior
+- When data is fresh (< 24h since last scan): no banner. UI unchanged.
+- When data is stale (≥ 24h since last scan): yellow warning banner near the top of the dashboard:
+  > ⚠ Last scan was N hours/days ago. Recent Claude Code activity may not appear. **[Rescan now]**
+- Clicking **Rescan now** triggers the same `/api/rescan` POST as the existing top-right Rescan button. After success, the banner disappears (or shows "Rescanned just now" briefly, then dismisses).
+- Banner dismissal does not persist — if the user dismisses and the data is still stale on next page load, it reappears. (Banner is a state, not a notification.)
+
+### "Last scan time" — source of truth
+- New table `scan_meta` with a single row:
+  ```sql
+  CREATE TABLE IF NOT EXISTS scan_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+  );
+  ```
+- `scanner.scan()` writes `('last_scan_at', <unix_timestamp>)` after each successful scan completes (full or incremental).
+- `INSERT OR REPLACE` keeps the row count at one.
+- `CREATE TABLE IF NOT EXISTS` is the only migration needed — existing DBs gain the table on next scan.
+
+### API
+- `/api/stats` response gains a field:
+  ```json
+  { ..., "last_scan_at": 1714060800, "data_age_seconds": 7200 }
+  ```
+- `data_age_seconds` is computed server-side as `now - last_scan_at`. If `last_scan_at` is missing (DB existed before this feature), return `null` and the dashboard treats it as fresh (no banner) — the next scan will populate it.
+
+### Frontend
+- On `loadData()`, if `data_age_seconds >= 86400`, render the banner.
+- Format the age human-readably: `2 hours ago`, `1 day ago`, `5 days ago`. Single function `formatRelativeTime(seconds)`.
+- Banner uses existing CSS variables (no new colors): yellow/warning tone via inline styles or a new `.banner-warn` class.
+
+### Edge cases
+- Brand new DB, never scanned: `last_scan_at` is null. No banner. (User just ran `cli.py dashboard` which scans first; data is by definition fresh.)
+- Clock skew (DB modified in the future): treat negative `data_age_seconds` as 0.
+- After clicking Rescan and waiting for completion, the next `loadData()` call will see the new `last_scan_at` and the banner will disappear automatically.
+
+### Non-goals
+- Configurable threshold (24h is fine for now; revisit if anyone asks).
+- Auto-rescan (no — explicit user action keeps the model simple and avoids surprise multi-minute background scans).
+- Push notification or sound.
+
+### Files
+- `scanner.py` — create `scan_meta` table, write `last_scan_at` at end of `scan()`.
+- `dashboard.py` — `/api/stats` returns `last_scan_at` and `data_age_seconds`; HTML/JS adds banner element + `formatRelativeTime` helper.
+
+---
+
 ## Architecture impact
 
 | Component | Change | Risk |
 |-----------|--------|------|
 | `README.md` | New section | None — docs only |
 | `dashboard.py` HTML/JS | "Custom…" button + form, `getRangeBounds` extension, URL parsing | Low — additive, reuses existing filter pipeline |
-| `scanner.py` | Optional `progress_callback` argument | Low — backwards-compatible default |
+| `scanner.py` | Optional `progress_callback` argument; `scan_meta` table with `last_scan_at` | Low — backwards-compatible default; `CREATE TABLE IF NOT EXISTS` handles migration |
 | `cli.py` | Pass progress callback in two commands | Low |
+| `dashboard.py` `/api/stats` | New fields `last_scan_at`, `data_age_seconds` | Low — additive |
+| `dashboard.py` HTML/JS | Stale-data banner element + `formatRelativeTime` helper | Low |
 
-No database schema changes. No new dependencies. No new HTTP endpoints.
+One new SQLite table (`scan_meta`). No new dependencies. No new HTTP endpoints.
 
 ---
 
@@ -164,6 +219,11 @@ No database schema changes. No new dependencies. No new HTTP endpoints.
   - Unit: `scanner.scan(..., progress_callback=mock)` → mock called N times for N files, with monotonically increasing `done`.
   - Manual: run `python3 cli.py scan` on real history, verify in-place updates render correctly in iTerm/Terminal.app.
   - Manual: pipe to file (`python3 cli.py scan 2>scan.log`) — verify periodic log lines, no carriage-return junk.
+- **Feature 4:**
+  - Unit: after `scanner.scan()` runs, `scan_meta` table contains a `last_scan_at` row with a value within a few seconds of `time.time()`.
+  - Unit: `/api/stats` returns `last_scan_at` and `data_age_seconds` correctly.
+  - Manual: artificially age the DB (`UPDATE scan_meta SET value = '<old timestamp>'`), reload dashboard, verify yellow banner appears with correct phrasing. Click "Rescan now", verify banner disappears after scan completes.
+  - Manual: brand-new DB (no `scan_meta` row) → no banner.
 
 Existing 91-test suite must continue to pass.
 
