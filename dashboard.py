@@ -254,6 +254,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
 </header>
 
+<div id="stale-banner">
+  <span>⚠ <span id="stale-banner-text">Last scan was a long time ago.</span> Recent Claude Code activity may not appear.</span>
+  <button id="stale-banner-rescan" onclick="rescanFromBanner()">Rescan now</button>
+</div>
+
 <div id="filter-bar">
   <div class="filter-label">Models</div>
   <div id="model-checkboxes"></div>
@@ -261,10 +266,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button class="filter-btn" onclick="clearAllModels()">None</button>
   <div class="filter-sep"></div>
   <div class="filter-label">Range</div>
-  <div id="stale-banner">
-    <span>⚠ <span id="stale-banner-text">Last scan was a long time ago.</span> Recent Claude Code activity may not appear.</span>
-    <button id="stale-banner-rescan" onclick="rescanFromBanner()">Rescan now</button>
-  </div>
   <div class="range-group">
     <button class="range-btn" data-range="week" onclick="setRange('week')">This Week</button>
     <button class="range-btn" data-range="month" onclick="setRange('month')">This Month</button>
