@@ -645,5 +645,33 @@ class TestParseJsonlFileLineCount(unittest.TestCase):
         self.assertEqual(line_count, 0)
 
 
+def test_init_db_creates_scan_meta_table(tmp_path):
+    """init_db should create a scan_meta table with key/value columns."""
+    import scanner
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+
+    # scan_meta should exist with expected columns
+    cols = conn.execute("PRAGMA table_info(scan_meta)").fetchall()
+    col_names = [c[1] for c in cols]
+    assert col_names == ["key", "value"], f"unexpected columns: {col_names}"
+
+    # key should be PRIMARY KEY
+    pk_cols = [c for c in cols if c[5] == 1]  # column 5 is `pk` flag
+    assert len(pk_cols) == 1 and pk_cols[0][1] == "key"
+    conn.close()
+
+
+def test_init_db_scan_meta_idempotent(tmp_path):
+    """Calling init_db twice should not raise (CREATE TABLE IF NOT EXISTS)."""
+    import scanner
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    scanner.init_db(conn)  # second call should be a no-op
+    conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

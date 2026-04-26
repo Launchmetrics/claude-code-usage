@@ -77,6 +77,11 @@ def init_db(conn):
         CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
         CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp);
         CREATE INDEX IF NOT EXISTS idx_sessions_first ON sessions(first_timestamp);
+
+        CREATE TABLE IF NOT EXISTS scan_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     """)
     # Add message_id column if upgrading from older schema
     try:
