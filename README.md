@@ -85,7 +85,7 @@ If you've never used the Terminal before, follow these steps. They take about 5 
 
 ### 2. Install and run the dashboard
 
-In the same Terminal window, paste these two commands one at a time. Each one may take a few seconds.
+In the same Terminal window, paste these commands one at a time. Each one may take a few seconds.
 
 ```
 git clone https://github.com/Launchmetrics/claude-code-usage
