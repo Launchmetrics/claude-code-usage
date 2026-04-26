@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-26
+
+- Add "Setup for non-technical users (macOS)" section to README
+- Add Custom date range picker (calendar-based, additive to preset buttons)
+- Add in-place scan progress in terminal (TTY) and periodic logging (non-TTY)
+- Add stale-data banner to dashboard when last scan is older than 24 hours
+- New `scan_meta` table tracks `last_scan_at` (auto-created via CREATE TABLE IF NOT EXISTS)
+
 ## 2026-04-09
 
 - Fix token counts inflated ~2x by deduplicating streaming events that share the same message ID
