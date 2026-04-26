@@ -1,0 +1,176 @@
+# Design: README clarity, custom date range, scan progress
+
+**Date:** 2026-04-26
+**Author:** Pau Montero (pau.montero@launchmetrics.com)
+**Status:** Proposed
+
+## Context
+
+The Launchmetrics fork of `claude-code-usage` is being shared with colleagues across the company, with mixed technical levels. Three rough edges have surfaced:
+
+1. **Setup is intimidating for non-technical colleagues.** The README assumes comfort with terminals, `git`, and Python. New users need a more guided path.
+2. **The preset date ranges (Week / Month / 7d / 30d / 90d / All) don't cover every question.** "How much did we spend last quarter?" or "Show me last week (Mon–Fri)" requires arbitrary date picking.
+3. **First scan is slow and silent.** `cli.py scan` can take several minutes for a heavy user's history. Currently it prints nothing until done, so users wonder if it hung.
+
+Constraints carried from upstream:
+- Pure stdlib (no `pip install`, no virtualenv).
+- Single-page HTML embedded in `dashboard.py`.
+- Chart.js loaded from public CDN; no other JS libraries.
+
+---
+
+## Feature 1: README "Setup for non-technical users"
+
+### Goal
+A colleague who has never opened Terminal should be able to follow the README from start to working dashboard without help.
+
+### Scope
+- Add a new section between **Quick Start** and **Usage**, titled **"Setup for non-technical users (macOS)"**.
+- Walk through:
+  1. **Verify Python is installed.** `python3 --version` → expect 3.8 or higher. If "command not found", link to python.org's macOS installer.
+  2. **Open Terminal.** `Cmd+Space` → type "Terminal" → Enter.
+  3. **Paste the setup commands.** Two commands (`git clone …` then `cd … && python3 cli.py dashboard`). Note that the dashboard will print a URL like `http://localhost:8080`; the browser should open automatically.
+  4. **What if something goes wrong?** Three common failures with one-line fixes:
+     - `command not found: git` → install Xcode Command Line Tools (`xcode-select --install`).
+     - `command not found: python3` → install from python.org.
+     - `Address already in use` → set a different port: `PORT=9000 python3 cli.py dashboard`.
+
+### Non-goals
+- Windows-specific walkthrough (Launchmetrics colleagues are on Macs; the existing Quick Start covers Windows enough for the technical minority).
+- Screenshots (rot quickly when UI changes).
+- Video.
+
+### Files
+- `README.md` only.
+
+---
+
+## Feature 2: Custom date range picker
+
+### Goal
+Let users pick an arbitrary `[from, to]` date range, in addition to the existing presets, with bookmarkable URLs.
+
+### UX
+- Existing preset row: `This Week | This Month | 7d | 30d | 90d | All`.
+- Add a new **"Custom…"** button at the end of the row.
+- Clicking **"Custom…"** toggles a small form below the row:
+  - `From: <input type="date">`
+  - `To:   <input type="date">`
+  - `Apply` button
+- Defaults: `From` = 30 days ago, `To` = today (matches current default range).
+- Native browser date pickers — no JS library, no styling work beyond what the rest of the page uses.
+- After Apply, the **"Custom…"** button shows the active range as its label, e.g. `Custom: 2026-03-01 → 2026-04-15`, so users can see the active range at a glance.
+
+### URL persistence
+- `?range=custom&from=YYYY-MM-DD&to=YYYY-MM-DD`
+- Existing presets continue to use `?range=week|month|7d|30d|90d|all`.
+- On page load, if `range=custom`, the form is pre-populated and the chart filters apply immediately.
+- Existing `history.replaceState` URL persistence is reused.
+
+### Implementation
+- `getRangeBounds(range)` in `dashboard.py` HTML/JS gains a `custom` branch:
+  ```javascript
+  if (range === 'custom') {
+    const params = new URLSearchParams(window.location.search);
+    return {
+      start: params.get('from'),
+      end:   params.get('to'),
+    };
+  }
+  ```
+- Apply button writes `?range=custom&from=…&to=…` and re-runs the existing filter pipeline.
+- All existing chart/table filters already accept `{start, end}`, so no downstream changes.
+
+### Edge cases
+- `From > To` → swap silently before applying.
+- `From > today` → clamp to today.
+- Either field empty → Apply is disabled.
+- Invalid dates → browser native `<input type="date">` prevents this; no extra validation needed.
+
+### Non-goals
+- Calendar widget library (jQuery UI / Pikaday / Flatpickr) — native `<input type="date">` is good enough and stays within the no-deps constraint.
+- Quick chips inside the custom form (e.g. "Last quarter") — presets handle the common cases.
+- Time-of-day precision — date granularity matches the rest of the dashboard.
+
+### Files
+- `dashboard.py` only (HTML + embedded JS).
+
+---
+
+## Feature 3: Scan progress in terminal
+
+### Goal
+During `python3 cli.py scan`, the user should see continuous progress so they know the process is alive and can estimate when it will finish.
+
+### Behavior
+- Before scanning, list all candidate JSONL files (already happens internally) and print a one-line header: `Found 312 JSONL files. Scanning…`.
+- For each file processed, update a single line in place using carriage return:
+  ```
+  Scanning… 47 / 312 files (15%)
+  ```
+- After the last file, print a final summary:
+  ```
+  Done. 312 files, 18,452 turns, 4.2s.
+  ```
+- If no new files (incremental scan with nothing new), print a single line: `No new or modified files. Database is up to date.`
+
+### Implementation
+- `scanner.scan()` accepts a new optional argument `progress_callback: Optional[Callable[[int, int], None]] = None`.
+  - Called as `progress_callback(processed_count, total_count)` after each file.
+  - When `None` (existing call sites that don't pass it), behavior is unchanged.
+- `cli.py`'s `cmd_scan` and `cmd_dashboard` pass a callback that prints to stderr using carriage return:
+  ```python
+  def progress(done, total):
+      sys.stderr.write(f"\rScanning… {done} / {total} files ({100*done//total}%)")
+      sys.stderr.flush()
+  ```
+- After scan completes, print final summary with a leading `\n` to clear the in-place line.
+- TTY detection: if `sys.stderr.isatty()` is `False` (e.g. piped to a log file), fall back to one log line every 50 files instead of carriage-return updates.
+
+### Non-goals (deferred)
+- Server-first `cmd_dashboard` (start HTTP server, then run scan in a background thread).
+- `/api/scan-status` endpoint and dashboard polling banner.
+- Browser auto-opens before scan finishes.
+
+These are deferred until colleagues actually report the empty-dashboard-during-first-scan as a pain point. The terminal progress alone solves the "is it hung?" question, which is the primary fear.
+
+### Files
+- `scanner.py` — add `progress_callback` parameter to `scan()`.
+- `cli.py` — wire the callback in `cmd_scan` and `cmd_dashboard`.
+
+---
+
+## Architecture impact
+
+| Component | Change | Risk |
+|-----------|--------|------|
+| `README.md` | New section | None — docs only |
+| `dashboard.py` HTML/JS | "Custom…" button + form, `getRangeBounds` extension, URL parsing | Low — additive, reuses existing filter pipeline |
+| `scanner.py` | Optional `progress_callback` argument | Low — backwards-compatible default |
+| `cli.py` | Pass progress callback in two commands | Low |
+
+No database schema changes. No new dependencies. No new HTTP endpoints.
+
+---
+
+## Testing
+
+- **Feature 1:** Manual — have a non-technical colleague follow the README cold.
+- **Feature 2:**
+  - Unit-ish: assert `getRangeBounds('custom')` returns the from/to from URL.
+  - Manual: pick custom range, verify all charts and tables filter correctly, bookmark URL, reload, verify range restored.
+  - Edge cases: From > To, empty fields, future dates.
+- **Feature 3:**
+  - Unit: `scanner.scan(..., progress_callback=mock)` → mock called N times for N files, with monotonically increasing `done`.
+  - Manual: run `python3 cli.py scan` on real history, verify in-place updates render correctly in iTerm/Terminal.app.
+  - Manual: pipe to file (`python3 cli.py scan 2>scan.log`) — verify periodic log lines, no carriage-return junk.
+
+Existing 91-test suite must continue to pass.
+
+---
+
+## Rollout
+
+Single PR to the Launchmetrics fork (`main` branch). All three features are independent and additive — no migration, no breaking changes for existing users. Tag a new release `v0.2.0-launchmetrics.1`.
+
+Upstream (`phuryn/claude-usage`) PR is optional — README changes are Launchmetrics-specific (mention the fork), but Features 2 and 3 are general improvements worth contributing back. Decide after the fork lands.
