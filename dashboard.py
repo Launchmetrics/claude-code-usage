@@ -526,7 +526,7 @@ const VALID_RANGES = Object.keys(RANGE_LABELS);
 function rangeIncludesToday(range) {
   if (range === 'all') return true;
   const { start, end } = getRangeBounds(range);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocalISO();
   if (start && today < start) return false;
   if (end && today > end) return false;
   return true;
@@ -541,7 +541,7 @@ function getRangeBounds(range) {
     // Swap if reversed
     if (from && to && from > to) [from, to] = [to, from];
     // Clamp future from to today
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalISO();
     if (from && from > today) from = today;
     return { start: from || null, end: to || null };
   }
@@ -582,10 +582,10 @@ function toggleCustomRangeForm() {
     const params = new URLSearchParams(window.location.search);
     const fromInput = document.getElementById('custom-from');
     const toInput   = document.getElementById('custom-to');
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalISO();
     const thirtyAgo = (() => {
       const d = new Date(); d.setDate(d.getDate() - 30);
-      return d.toISOString().slice(0, 10);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     })();
     fromInput.value = params.get('from') || thirtyAgo;
     toInput.value   = params.get('to')   || today;
@@ -606,7 +606,7 @@ function applyCustomRange() {
   history.replaceState(null, '', url);
   setRange('custom');
   const btn = document.querySelector('.range-btn[data-range="custom"]');
-  if (btn) btn.textContent = 'Custom: ' + from + ' \u2192 ' + to;
+  if (btn) btn.textContent = 'Custom: ' + from + RANGE_ARROW + to;
 }
 
 function setRange(range) {
@@ -614,6 +614,12 @@ function setRange(range) {
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
   );
+  if (range !== 'custom') {
+    const form = document.getElementById('custom-range-form');
+    if (form) form.style.display = 'none';
+    const btn = document.querySelector('.range-btn[data-range="custom"]');
+    if (btn) btn.textContent = CUSTOM_LABEL;
+  }
   updateURL();
   applyFilter();
   scheduleAutoRefresh();
@@ -1272,6 +1278,13 @@ function formatRelativeTime(seconds) {
 }
 
 const STALE_THRESHOLD_SECONDS = 86400;  // 24 hours
+const CUSTOM_LABEL = 'Custom\u2026';
+const RANGE_ARROW  = ' \u2192 ';
+
+function todayLocalISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 
 function updateStaleBanner(dataAgeSeconds) {
   const banner = document.getElementById('stale-banner');
@@ -1350,7 +1363,7 @@ async function loadData() {
           const form = document.getElementById('custom-range-form');
           if (form) form.style.display = 'flex';
           const btn = document.querySelector('.range-btn[data-range="custom"]');
-          if (btn) btn.textContent = 'Custom: ' + from + ' \u2192 ' + to;
+          if (btn) btn.textContent = 'Custom: ' + from + RANGE_ARROW + to;
         }
       }
       document.querySelectorAll('.range-btn').forEach(btn =>
