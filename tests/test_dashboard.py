@@ -264,5 +264,62 @@ class TestPricingParity(unittest.TestCase):
             )
 
 
+def test_api_data_includes_last_scan_at_and_data_age(tmp_path, monkeypatch):
+    """After a scan, get_dashboard_data should include last_scan_at and data_age_seconds."""
+    import dashboard
+    import scanner
+
+    db_path = tmp_path / "test.db"
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    scanner.scan(projects_dir=projects_dir, db_path=db_path, verbose=False)
+
+    monkeypatch.setattr(dashboard, "DB_PATH", db_path)
+    data = dashboard.get_dashboard_data(db_path=db_path)
+
+    assert "last_scan_at" in data
+    assert "data_age_seconds" in data
+    assert isinstance(data["last_scan_at"], (int, float))
+    assert isinstance(data["data_age_seconds"], (int, float))
+    assert data["data_age_seconds"] >= 0
+
+
+def test_api_data_returns_null_last_scan_at_when_missing(tmp_path):
+    """If scan_meta has no last_scan_at row, last_scan_at should be null."""
+    import dashboard
+    import scanner
+
+    db_path = tmp_path / "test.db"
+    # Initialize DB schema but do NOT run a scan, so scan_meta stays empty
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    conn.close()
+
+    data = dashboard.get_dashboard_data(db_path=db_path)
+    assert data["last_scan_at"] is None
+    assert data["data_age_seconds"] is None
+
+
+def test_api_data_clamps_negative_data_age_to_zero(tmp_path):
+    """If last_scan_at is in the future (clock skew), data_age_seconds should be 0."""
+    import dashboard
+    import scanner
+    import time
+
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    future = time.time() + 3600  # 1 hour in the future
+    conn.execute(
+        "INSERT OR REPLACE INTO scan_meta (key, value) VALUES (?, ?)",
+        ("last_scan_at", str(future)),
+    )
+    conn.commit()
+    conn.close()
+
+    data = dashboard.get_dashboard_data(db_path=db_path)
+    assert data["data_age_seconds"] == 0
+
+
 if __name__ == "__main__":
     unittest.main()

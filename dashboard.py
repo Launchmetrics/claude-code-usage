@@ -5,11 +5,20 @@ dashboard.py - Local web dashboard served on localhost:8080.
 import json
 import os
 import sqlite3
+import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime
 
 DB_PATH = Path.home() / ".claude" / "usage.db"
+
+
+def _table_exists(conn, name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -110,14 +119,27 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    # ── Scan staleness signal ────────────────────────────────────────────────
+    last_scan_row = conn.execute(
+        "SELECT value FROM scan_meta WHERE key = 'last_scan_at'"
+    ).fetchone() if _table_exists(conn, "scan_meta") else None
+    if last_scan_row:
+        last_scan_at = float(last_scan_row["value"])
+        data_age_seconds = max(0.0, time.time() - last_scan_at)
+    else:
+        last_scan_at = None
+        data_age_seconds = None
+
     conn.close()
 
     return {
-        "all_models":      all_models,
-        "daily_by_model":  daily_by_model,
-        "hourly_by_model": hourly_by_model,
-        "sessions_all":    sessions_all,
-        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":       all_models,
+        "daily_by_model":   daily_by_model,
+        "hourly_by_model":  hourly_by_model,
+        "sessions_all":     sessions_all,
+        "generated_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_scan_at":     last_scan_at,
+        "data_age_seconds": data_age_seconds,
     }
 
 
