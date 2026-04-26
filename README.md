@@ -11,11 +11,13 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 
 **Created by:** [The Product Compass Newsletter](https://www.productcompass.pm)
 
+**This is a Launchmetrics fork of [phuryn/claude-usage](https://github.com/phuryn/claude-usage)** — maintained for internal use, with bug fixes and clarifications. Upstream contributions still welcome.
+
 ---
 
 ## What this tracks
 
-Works on **API, Pro, and Max plans** — Claude Code writes local usage logs regardless of subscription type. This tool reads those logs and gives you visibility that Anthropic's UI doesn't provide.
+Works on **API, Pro, Max, Teams, and Enterprise plans** — Claude Code writes local usage logs regardless of subscription type. This tool reads those logs and gives you visibility that Anthropic's UI doesn't provide.
 
 Captures usage from:
 - **Claude Code CLI** (`claude` command in terminal)
@@ -24,13 +26,26 @@ Captures usage from:
 
 **Not captured:**
 - **Cowork sessions** — these run server-side and do not write local JSONL transcripts
+- **Sessions on other machines** — only logs in this Mac/PC's `~/.claude/` are read; nothing is synced
+- **Web claude.ai usage** — different product, not Claude Code
+
+### Account attribution
+
+Claude Code writes all sessions to the same local directory (`~/.claude/projects/`) regardless of which Claude account is signed in. If you switch between accounts (e.g. Max, Pro, Teams, Enterprise, or an API key) on the same machine, **all of their sessions land in one pile** and the JSONL records contain **no account, org, or plan identifier**. This dashboard therefore cannot:
+
+- split usage by account
+- tell you which account paid for which session
+- detect that you switched plans
+
+If you need per-account attribution, you'll need to track that yourself (e.g. by separating projects per account, or by inspecting timestamps against when you switched).
 
 ---
 
 ## Requirements
 
 - Python 3.8+
-- No third-party packages — uses only the standard library (`sqlite3`, `http.server`, `json`, `pathlib`)
+- No third-party Python packages — uses only the standard library (`sqlite3`, `http.server`, `json`, `pathlib`)
+- The dashboard page loads Chart.js from a public CDN (`cdn.jsdelivr.net`); offline use will show empty charts
 
 > Anyone running Claude Code already has Python installed.
 
@@ -40,15 +55,15 @@ No `pip install`, no virtual environment, no build step.
 
 ### Windows
 ```
-git clone https://github.com/phuryn/claude-usage
-cd claude-usage
+git clone https://github.com/Launchmetrics/claude-code-usage
+cd claude-code-usage
 python cli.py dashboard
 ```
 
 ### macOS / Linux
 ```
-git clone https://github.com/phuryn/claude-usage
-cd claude-usage
+git clone https://github.com/Launchmetrics/claude-code-usage
+cd claude-code-usage
 python3 cli.py dashboard
 ```
 
@@ -116,6 +131,21 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 | claude-haiku-4-5 | $1.00/MTok | $5.00/MTok | $1.25/MTok | $0.10/MTok |
 
 > **Note:** These are API prices. If you use Claude Code via a Max or Pro subscription, your actual cost structure is different (subscription-based, not per-token).
+
+### What "Est. Cost" actually means
+
+Read the dashboard's cost figures as **"what this usage would cost on the API at today's prices"**, not as your actual spend. Specifically:
+
+- **Subscription plans (Max, Pro, Teams, Enterprise):** you pay a flat fee with included usage, so the marginal per-session cost is effectively $0 within plan limits. The dollar value the dashboard prints is hypothetical.
+- **API key (pay-as-you-go):** the estimate is roughly right, modulo the caveats below.
+- **Pricing is frozen** at the April 2026 table above. Sessions from earlier (or later) are repriced at these rates regardless of what was charged at the time.
+- **No volume / commitment discounts** are applied — enterprise contracts often have negotiated rates the dashboard cannot know about.
+- **Mixed accounts** — because the dashboard cannot tell which account ran a session (see [Account attribution](#account-attribution)), it cannot apply different pricing assumptions per account.
+
+What the cost number IS useful for:
+- **Relative comparison** between projects, models, sessions, days — the *ratios* are meaningful even when the absolute dollar value is wrong.
+- **Spotting expensive patterns** (e.g. a single session burning massive cache writes).
+- **Sizing API spend** if you were considering migrating from a subscription to API-based billing.
 
 ---
 
