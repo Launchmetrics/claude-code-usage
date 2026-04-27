@@ -17,6 +17,19 @@ NOISE_SKIPLIST = {
     "yes", "no", "ok", "okay", "exit", "y", "n",
     "continue", "thanks", "thank you", "great", "alright",
 }
+# Claude Code stores many non-prompt artefacts in user records: slash-command
+# wrappers, bash invocations, local-command output, system reminders, and
+# the auto-context-continuation notice. These are noise for activity inference.
+NOISE_PREFIXES = (
+    "<command-name>", "<command-message>", "<command-args>",
+    "<local-command-stdout>", "<local-command-stderr>",
+    "<local-command-caveat>",
+    "<bash-input>", "<bash-stdout>", "<bash-stderr>",
+    "<task-notification>", "<system-reminder>",
+    "[Request interrupted by user]",
+    "This session is being continued from a previous conversation",
+    "Base directory for this skill:",
+)
 MIN_PROMPT_LENGTH = 5
 MAX_INPUT_BYTES = 4096
 DEFAULT_MAX_CELLS = 50
@@ -53,7 +66,10 @@ def prompt_hash(text: str) -> str:
 
 
 def _is_noise(text: str) -> bool:
-    t = text.strip().lower()
+    stripped = text.strip()
+    if any(stripped.startswith(p) for p in NOISE_PREFIXES):
+        return True
+    t = stripped.lower()
     return len(t) < MIN_PROMPT_LENGTH or t in NOISE_SKIPLIST
 
 
