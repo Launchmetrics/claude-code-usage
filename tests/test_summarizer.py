@@ -112,6 +112,37 @@ def test_collect_prompts_returns_empty_when_no_matches(tmp_path):
     assert text == ""
 
 
+def test_encoded_dirname_replaces_dots_and_spaces():
+    # Claude Code encodes /, ., and whitespace all as "-"
+    assert summarizer._encoded_dirname(
+        "/Users/pau.montero/Projectes/claude-costs-dashboard"
+    ) == "-Users-pau-montero-Projectes-claude-costs-dashboard"
+    assert summarizer._encoded_dirname(
+        "/Users/pau.montero/Projectes/launchmetrics/AIpril retrospectives"
+    ) == "-Users-pau-montero-Projectes-launchmetrics-AIpril-retrospectives"
+    # /. produces "--" (consecutive dashes preserved)
+    assert summarizer._encoded_dirname(
+        "/Users/pau.montero/.claude"
+    ) == "-Users-pau-montero--claude"
+
+
+def test_collect_prompts_finds_dir_when_cwd_has_dots(tmp_path):
+    # Regression: cwd with "." in segment names must match Claude Code's
+    # encoded dir which replaces "." with "-".
+    proj_dir = tmp_path / "-Users-pau-montero-Projectes-claude-costs-dashboard"
+    proj_dir.mkdir()
+    _write_jsonl(proj_dir / "session.jsonl", [
+        {"type": "user", "timestamp": "2026-04-27T10:00:00Z",
+         "message": {"content": "wire up the calendar picker"}},
+    ])
+    text = summarizer.collect_prompts(
+        date="2026-04-27",
+        cwd="/Users/pau.montero/Projectes/claude-costs-dashboard",
+        projects_dirs=[tmp_path],
+    )
+    assert text == "wire up the calendar picker"
+
+
 def _seed_turns(db_path, rows):
     """rows: list of (timestamp, cwd, model, input, output, cache_read, cache_write)"""
     import scanner

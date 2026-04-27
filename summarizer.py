@@ -72,8 +72,17 @@ def _extract_prompt_text(rec: dict) -> str:
 
 
 def _encoded_dirname(cwd: str) -> str:
-    """The convention Claude Code uses to name per-project subdirectories."""
-    return cwd.replace("/", "-")
+    """The convention Claude Code uses to name per-project subdirectories:
+    every `/`, `.`, and whitespace character in the cwd is replaced with `-`.
+    E.g. `/Users/pau.montero/Projectes/x y` → `-Users-pau-montero-Projectes-x-y`.
+    """
+    out = []
+    for ch in cwd:
+        if ch == "/" or ch == "." or ch.isspace():
+            out.append("-")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def collect_prompts(date: str, cwd: str, projects_dirs) -> str:
