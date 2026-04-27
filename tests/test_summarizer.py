@@ -1,4 +1,5 @@
 import json
+import time
 import pytest
 import sqlite3
 
@@ -271,15 +272,12 @@ def test_run_claude_handles_missing_activities_key(monkeypatch):
     assert err == "parse_error"
 
 
-import time
-
-
 def _seed_jsonl_for_cell(projects_dir, cwd, date, prompts):
     proj_dir = projects_dir / cwd.replace("/", "-")
     proj_dir.mkdir(parents=True, exist_ok=True)
     records = [
         {"type": "user",
-         "timestamp": f"{date}T10:0{i}:00Z",
+         "timestamp": f"{date}T10:{i:02d}:00Z",
          "message": {"content": p}}
         for i, p in enumerate(prompts)
     ]
@@ -318,7 +316,7 @@ def test_summarize_cell_calls_claude_and_writes_cache(tmp_path):
 
 
 def test_summarize_cell_returns_cache_hit(tmp_path):
-    import scanner, time
+    import scanner
     db = tmp_path / "u.db"
     conn = scanner.get_db(db)
     scanner.init_db(conn)
@@ -349,7 +347,7 @@ def test_summarize_cell_returns_cache_hit(tmp_path):
 
 
 def test_summarize_cell_invalidates_on_hash_mismatch(tmp_path):
-    import scanner, time
+    import scanner
     db = tmp_path / "u.db"
     conn = scanner.get_db(db)
     scanner.init_db(conn)
