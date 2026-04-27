@@ -1,4 +1,6 @@
 import json
+import pytest
+import sqlite3
 
 import summarizer
 
@@ -107,3 +109,79 @@ def test_collect_prompts_returns_empty_when_no_matches(tmp_path):
         projects_dirs=[tmp_path],
     )
     assert text == ""
+
+
+def _seed_turns(db_path, rows):
+    """rows: list of (timestamp, cwd, model, input, output, cache_read, cache_write)"""
+    import scanner
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    for ts, cwd, model, inp, out, cr, cw in rows:
+        conn.execute("""
+            INSERT INTO turns
+              (session_id, timestamp, model, input_tokens, output_tokens,
+               cache_read_tokens, cache_creation_tokens, cwd)
+            VALUES ('s1', ?, ?, ?, ?, ?, ?, ?)
+        """, (ts, model, inp, out, cr, cw, cwd))
+    conn.commit()
+    conn.close()
+
+
+def test_rank_cells_groups_by_day_and_cwd(tmp_path):
+    db = tmp_path / "u.db"
+    _seed_turns(db, [
+        ("2026-04-25T10:00:00Z", "/proj/A", "claude-haiku-4-5", 1_000_000, 0, 0, 0),
+        ("2026-04-25T11:00:00Z", "/proj/A", "claude-haiku-4-5", 1_000_000, 0, 0, 0),
+        ("2026-04-25T12:00:00Z", "/proj/B", "claude-haiku-4-5",   500_000, 0, 0, 0),
+    ])
+    cells = summarizer.rank_cells_by_cost(db, max_cells=10, percentile=0)
+    by_key = {(d, c): cost for d, c, cost in cells}
+    assert by_key[("2026-04-25", "/proj/A")] == pytest.approx(2.0, rel=0.01)
+    assert by_key[("2026-04-25", "/proj/B")] == pytest.approx(0.5, rel=0.01)
+
+
+def test_rank_cells_applies_percentile_threshold(tmp_path):
+    db = tmp_path / "u.db"
+    rows = []
+    for i in range(10):
+        rows.append(
+            (f"2026-04-{i+1:02d}T10:00:00Z", f"/proj/{i}",
+             "claude-haiku-4-5", (i + 1) * 1_000_000, 0, 0, 0)
+        )
+    _seed_turns(db, rows)
+    cells = summarizer.rank_cells_by_cost(db, max_cells=100, percentile=80)
+    assert len(cells) == 2
+    assert cells[0][2] > cells[1][2]
+
+
+def test_rank_cells_caps_at_max_cells(tmp_path):
+    db = tmp_path / "u.db"
+    rows = [
+        (f"2026-04-{i+1:02d}T10:00:00Z", f"/proj/{i}",
+         "claude-haiku-4-5", 1_000_000, 0, 0, 0)
+        for i in range(20)
+    ]
+    _seed_turns(db, rows)
+    cells = summarizer.rank_cells_by_cost(db, max_cells=3, percentile=0)
+    assert len(cells) == 3
+
+
+def test_rank_cells_skips_zero_cost(tmp_path):
+    db = tmp_path / "u.db"
+    _seed_turns(db, [
+        ("2026-04-25T10:00:00Z", "/proj/A", "unknown-model", 1_000_000, 0, 0, 0),
+        ("2026-04-25T11:00:00Z", "/proj/B", "claude-haiku-4-5", 1_000_000, 0, 0, 0),
+    ])
+    cells = summarizer.rank_cells_by_cost(db, max_cells=10, percentile=0)
+    cwds = {c[1] for c in cells}
+    assert "/proj/A" not in cwds
+    assert "/proj/B" in cwds
+
+
+def test_rank_cells_empty_db(tmp_path):
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    assert summarizer.rank_cells_by_cost(db, max_cells=10) == []

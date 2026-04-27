@@ -118,3 +118,51 @@ def collect_prompts(date: str, cwd: str, projects_dirs) -> str:
         out.append(p)
         size += len(encoded) + 1
     return "\n".join(out)
+
+
+def rank_cells_by_cost(db_path, max_cells=None, percentile=None):
+    """
+    Returns a sorted list of (date, cwd, cost_usd) tuples for the eager set —
+    cells whose cost is at or above the given percentile, capped at max_cells,
+    sorted descending by cost. Skips cells with cost == 0 (unknown models).
+    """
+    if max_cells is None:
+        max_cells = int(os.environ.get("SUMMARY_MAX_CELLS", str(DEFAULT_MAX_CELLS)))
+    if percentile is None:
+        percentile = DEFAULT_PERCENTILE
+    from cli import calc_cost
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT
+            substr(timestamp, 1, 10) AS day,
+            cwd,
+            model,
+            input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens
+        FROM turns
+        WHERE cwd IS NOT NULL AND cwd != ''
+    """).fetchall()
+    conn.close()
+    cells = {}
+    for r in rows:
+        cost = calc_cost(
+            r["model"],
+            r["input_tokens"] or 0,
+            r["output_tokens"] or 0,
+            r["cache_read_tokens"] or 0,
+            r["cache_creation_tokens"] or 0,
+        )
+        if cost <= 0:
+            continue
+        key = (r["day"], r["cwd"])
+        cells[key] = cells.get(key, 0.0) + cost
+    items = [(d, c, cost) for (d, c), cost in cells.items() if cost > 0]
+    if not items:
+        return []
+    costs = sorted(cost for _, _, cost in items)
+    pct_idx = min(int(len(costs) * (percentile / 100)), len(costs) - 1)
+    threshold = costs[pct_idx]
+    eager = [item for item in items if item[2] >= threshold]
+    eager.sort(key=lambda c: -c[2])
+    return eager[:max_cells]
