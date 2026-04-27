@@ -216,3 +216,40 @@ def run_claude(prompt_text, model=None, timeout=SUBPROCESS_TIMEOUT):
         return [str(a) for a in activities], None
     except (json.JSONDecodeError, AttributeError):
         return None, "parse_error"
+
+
+def summarize_cell(date, cwd, cost_usd, db_path, projects_dirs, model=None):
+    """
+    Orchestrate one (date, cwd) summary: collect prompts, check cache,
+    invoke claude if needed, persist result. Errors are returned, not raised.
+    """
+    text = collect_prompts(date, cwd, projects_dirs)
+    if not text:
+        return {"activities": None, "cached": False, "error": "no_prompts"}
+    h = prompt_hash(text)
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT prompt_hash, activities FROM daily_summaries "
+            "WHERE summary_date=? AND project_path=?",
+            (date, cwd),
+        ).fetchone()
+        if row is not None and row[0] == h:
+            return {
+                "activities": json.loads(row[1]),
+                "cached": True,
+                "error": None,
+            }
+        activities, err = run_claude(text, model=model)
+        if err is not None:
+            return {"activities": None, "cached": False, "error": err}
+        conn.execute("""
+            INSERT OR REPLACE INTO daily_summaries
+              (summary_date, project_path, prompt_hash,
+               activities, cost_usd, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (date, cwd, h, json.dumps(activities), cost_usd, time.time()))
+        conn.commit()
+        return {"activities": activities, "cached": False, "error": None}
+    finally:
+        conn.close()

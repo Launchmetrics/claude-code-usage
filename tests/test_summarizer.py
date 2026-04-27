@@ -269,3 +269,150 @@ def test_run_claude_handles_missing_activities_key(monkeypatch):
         activities, err = summarizer.run_claude("hi", model="haiku")
     assert activities is None
     assert err == "parse_error"
+
+
+import time
+
+
+def _seed_jsonl_for_cell(projects_dir, cwd, date, prompts):
+    proj_dir = projects_dir / cwd.replace("/", "-")
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {"type": "user",
+         "timestamp": f"{date}T10:0{i}:00Z",
+         "message": {"content": p}}
+        for i, p in enumerate(prompts)
+    ]
+    (proj_dir / "session.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records),
+    )
+
+
+def test_summarize_cell_calls_claude_and_writes_cache(tmp_path):
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    proj = tmp_path / "projects"
+    proj.mkdir()
+    _seed_jsonl_for_cell(proj, "/Users/x/myproj", "2026-04-25",
+                         ["refactor the api", "add tests for the new endpoint"])
+    fake = json.dumps({"result": json.dumps({"activities": ["Refactored API"]})})
+    with patch("subprocess.run", return_value=_mock_claude_response(fake)):
+        result = summarizer.summarize_cell(
+            date="2026-04-25", cwd="/Users/x/myproj", cost_usd=1.23,
+            db_path=db, projects_dirs=[proj],
+        )
+    assert result["activities"] == ["Refactored API"]
+    assert result["cached"] is False
+    assert result["error"] is None
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT activities, cost_usd FROM daily_summaries WHERE summary_date=?",
+        ("2026-04-25",),
+    ).fetchone()
+    conn.close()
+    assert json.loads(row[0]) == ["Refactored API"]
+    assert row[1] == 1.23
+
+
+def test_summarize_cell_returns_cache_hit(tmp_path):
+    import scanner, time
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    proj = tmp_path / "projects"
+    proj.mkdir()
+    _seed_jsonl_for_cell(proj, "/Users/x/myproj", "2026-04-25",
+                         ["refactor the api"])
+    text = summarizer.collect_prompts("2026-04-25", "/Users/x/myproj", [proj])
+    h = summarizer.prompt_hash(text)
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        INSERT INTO daily_summaries
+          (summary_date, project_path, prompt_hash, activities, cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, ("2026-04-25", "/Users/x/myproj", h,
+          json.dumps(["Cached activity"]), 1.0, time.time()))
+    conn.commit()
+    conn.close()
+    with patch("subprocess.run") as m:
+        result = summarizer.summarize_cell(
+            date="2026-04-25", cwd="/Users/x/myproj", cost_usd=1.0,
+            db_path=db, projects_dirs=[proj],
+        )
+    assert result["cached"] is True
+    assert result["activities"] == ["Cached activity"]
+    m.assert_not_called()
+
+
+def test_summarize_cell_invalidates_on_hash_mismatch(tmp_path):
+    import scanner, time
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    proj = tmp_path / "projects"
+    proj.mkdir()
+    _seed_jsonl_for_cell(proj, "/Users/x/myproj", "2026-04-25",
+                         ["original prompt"])
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        INSERT INTO daily_summaries
+          (summary_date, project_path, prompt_hash, activities, cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, ("2026-04-25", "/Users/x/myproj", "stale-hash",
+          json.dumps(["old"]), 1.0, time.time()))
+    conn.commit()
+    conn.close()
+    fake = json.dumps({"result": json.dumps({"activities": ["fresh"]})})
+    with patch("subprocess.run", return_value=_mock_claude_response(fake)):
+        result = summarizer.summarize_cell(
+            date="2026-04-25", cwd="/Users/x/myproj", cost_usd=1.0,
+            db_path=db, projects_dirs=[proj],
+        )
+    assert result["cached"] is False
+    assert result["activities"] == ["fresh"]
+
+
+def test_summarize_cell_does_not_cache_errors(tmp_path):
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    proj = tmp_path / "projects"
+    proj.mkdir()
+    _seed_jsonl_for_cell(proj, "/Users/x/myproj", "2026-04-25",
+                         ["a real prompt"])
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        result = summarizer.summarize_cell(
+            date="2026-04-25", cwd="/Users/x/myproj", cost_usd=1.0,
+            db_path=db, projects_dirs=[proj],
+        )
+    assert result["error"] == "claude_not_installed"
+    assert result["activities"] is None
+    conn = sqlite3.connect(db)
+    rows = conn.execute("SELECT * FROM daily_summaries").fetchall()
+    conn.close()
+    assert rows == []
+
+
+def test_summarize_cell_skips_when_no_prompts(tmp_path):
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    proj = tmp_path / "projects"
+    proj.mkdir()
+    with patch("subprocess.run") as m:
+        result = summarizer.summarize_cell(
+            date="2026-04-25", cwd="/Users/x/empty", cost_usd=1.0,
+            db_path=db, projects_dirs=[proj],
+        )
+    assert result["error"] == "no_prompts"
+    assert result["activities"] is None
+    m.assert_not_called()
