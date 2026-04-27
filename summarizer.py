@@ -123,8 +123,14 @@ def collect_prompts(date: str, cwd: str, projects_dirs) -> str:
 def rank_cells_by_cost(db_path, max_cells=None, percentile=None):
     """
     Returns a sorted list of (date, cwd, cost_usd) tuples for the eager set —
-    cells whose cost is at or above the given percentile, capped at max_cells,
-    sorted descending by cost. Skips cells with cost == 0 (unknown models).
+    cells whose cost is at or above the Nth-percentile threshold, capped at
+    max_cells, sorted descending by cost. Skips cells with cost == 0
+    (unknown models).
+
+    Percentile semantics (consistent with NumPy's default linear interpolation):
+      • percentile=0   → returns all positive-cost cells (then capped).
+      • percentile=80  → returns roughly the top 20% (default).
+      • percentile=100 → returns only cells tied at the maximum cost.
     """
     if max_cells is None:
         max_cells = int(os.environ.get("SUMMARY_MAX_CELLS", str(DEFAULT_MAX_CELLS)))

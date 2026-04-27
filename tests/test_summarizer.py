@@ -185,3 +185,14 @@ def test_rank_cells_empty_db(tmp_path):
     scanner.init_db(conn)
     conn.close()
     assert summarizer.rank_cells_by_cost(db, max_cells=10) == []
+
+
+def test_rank_cells_percentile_zero_returns_all_positive(tmp_path):
+    db = tmp_path / "u.db"
+    _seed_turns(db, [
+        ("2026-04-25T10:00:00Z", "/proj/A", "claude-haiku-4-5", 1_000_000, 0, 0, 0),
+        ("2026-04-25T11:00:00Z", "/proj/B", "claude-haiku-4-5",   500_000, 0, 0, 0),
+        ("2026-04-25T12:00:00Z", "/proj/C", "claude-haiku-4-5",   100_000, 0, 0, 0),
+    ])
+    cells = summarizer.rank_cells_by_cost(db, max_cells=10, percentile=0)
+    assert len(cells) == 3
