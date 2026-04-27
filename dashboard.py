@@ -179,13 +179,16 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
                              r["cr"] or 0, r["cw"] or 0)
             cell_costs[r["cwd"]] = cell_costs.get(r["cwd"], 0.0) + cost
 
-        cached_rows = conn.execute("""
-            SELECT project_path, activities
-            FROM daily_summaries
-            WHERE summary_date = ?
-        """, (date,)).fetchall()
-        cached = {r["project_path"]: json.loads(r["activities"])
-                  for r in cached_rows}
+        if _table_exists(conn, "daily_summaries"):
+            cached_rows = conn.execute("""
+                SELECT project_path, activities
+                FROM daily_summaries
+                WHERE summary_date = ?
+            """, (date,)).fetchall()
+            cached = {r["project_path"]: json.loads(r["activities"])
+                      for r in cached_rows}
+        else:
+            cached = {}
 
         eager_set = {(d, c) for d, c, _ in summarizer.rank_cells_by_cost(db_path)}
     finally:
