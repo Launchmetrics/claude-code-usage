@@ -143,22 +143,11 @@ def get_dashboard_data(db_path=DB_PATH):
     }
 
 
-def get_daily_summaries(date, db_path=None, projects_dirs=None):
-    """
-    Return cached + lazily-summarized cells for a single date. Triggers
-    summarize_cell synchronously for any (date, cwd) with activity but no
-    cached summary. Relies on ThreadingHTTPServer so other requests aren't
-    blocked while a lazy summary runs.
-    """
-    import summarizer, scanner
+def _day_cell_costs_and_cached(date, db_path):
+    """Return (cell_costs: {cwd: usd}, cached: {cwd: activities}, eager_set)
+    for a single date. Shared between the day-level and cell-level routes."""
+    import summarizer
     from cli import calc_cost
-    if db_path is None:
-        db_path = DB_PATH
-    if projects_dirs is None:
-        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
-    if not _date_is_valid(date):
-        return {"date": date, "cells": [], "error": "invalid_date"}
-
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -193,8 +182,27 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
         eager_set = {(d, c) for d, c, _ in summarizer.rank_cells_by_cost(db_path)}
     finally:
         conn.close()
+    return cell_costs, cached, eager_set
 
-    # Include all cwds that either have turns or a cached summary for this date
+
+def get_daily_summaries(date, db_path=None, projects_dirs=None):
+    """
+    Return the day's cell list immediately. Cached cells include their
+    activities; cells without a cached summary are returned with
+    pending=True so the client can fetch each one in parallel via
+    /api/cell-summary. This keeps the day-level endpoint instant and lets
+    summaries stream in instead of blocking on a sequential 30-60 s per
+    cell synchronous loop.
+    """
+    import scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not _date_is_valid(date):
+        return {"date": date, "cells": [], "error": "invalid_date"}
+
+    cell_costs, cached, eager_set = _day_cell_costs_and_cached(date, db_path)
     all_cwds = sorted(set(cell_costs.keys()) | set(cached.keys()))
 
     cells = []
@@ -204,19 +212,53 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
         if cwd in cached:
             cells.append({
                 "project": cwd, "cost": round(cost, 4),
-                "activities": cached[cwd], "error": None, "eager": is_eager,
+                "activities": cached[cwd], "error": None,
+                "eager": is_eager, "pending": False,
             })
         else:
-            result = summarizer.summarize_cell(
-                date=date, cwd=cwd, cost_usd=cost,
-                db_path=db_path, projects_dirs=projects_dirs,
-            )
             cells.append({
                 "project": cwd, "cost": round(cost, 4),
-                "activities": result["activities"],
-                "error": result["error"], "eager": is_eager,
+                "activities": None, "error": None,
+                "eager": is_eager, "pending": True,
             })
     return {"date": date, "cells": cells}
+
+
+def get_cell_summary(date, cwd, db_path=None, projects_dirs=None):
+    """
+    Run summarize_cell for one (date, cwd) and return the single cell.
+    The day-level endpoint defers to this so the client can parallelize.
+    """
+    import summarizer, scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not _date_is_valid(date):
+        return {"date": date, "project": cwd, "error": "invalid_date"}
+    if not isinstance(cwd, str) or not cwd.strip():
+        return {"date": date, "project": cwd, "error": "invalid_cwd"}
+
+    cell_costs, cached, eager_set = _day_cell_costs_and_cached(date, db_path)
+    cost = cell_costs.get(cwd, 0.0)
+    is_eager = (date, cwd) in eager_set
+
+    if cwd in cached:
+        return {
+            "date": date, "project": cwd, "cost": round(cost, 4),
+            "activities": cached[cwd], "error": None,
+            "eager": is_eager, "pending": False,
+        }
+    result = summarizer.summarize_cell(
+        date=date, cwd=cwd, cost_usd=cost,
+        db_path=db_path, projects_dirs=projects_dirs,
+    )
+    return {
+        "date": date, "project": cwd, "cost": round(cost, 4),
+        "activities": result["activities"],
+        "error": result["error"],
+        "eager": is_eager, "pending": False,
+    }
 
 
 def _date_is_valid(date):
@@ -1548,7 +1590,7 @@ async function loadDayActivities(detailsEl) {
   if (dailyState.inFlight.has(date)) return;
   dailyState.inFlight.set(date, true);
   const body = detailsEl.querySelector('.day-body');
-  body.innerHTML = '<p class="spinner">Summarizing…</p>';
+  body.innerHTML = '<p class="spinner">Loading day…</p>';
   try {
     const resp = await fetch(`/api/daily-summaries?date=${encodeURIComponent(date)}`);
     if (!resp.ok) throw new Error(`Server error ${resp.status}`);
@@ -1556,6 +1598,10 @@ async function loadDayActivities(detailsEl) {
     data.cells.forEach(c => { c.__date = date; });
     body.innerHTML = data.cells.map(c => renderProjectBlock(c)).join('');
     dailyState.fetchedDates.add(date);
+    // Fire one /api/cell-summary per pending cell in parallel; replace the
+    // pending block as each one resolves so the user sees progress instead
+    // of one long blocking spinner.
+    data.cells.filter(c => c.pending).forEach(c => fetchCellSummary(detailsEl, date, c.project));
   } catch (e) {
     body.innerHTML = `<p class="err">Failed to load: ${escapeHtml(e.message)}</p>`;
   } finally {
@@ -1563,31 +1609,70 @@ async function loadDayActivities(detailsEl) {
   }
 }
 
+async function fetchCellSummary(detailsEl, date, cwd) {
+  try {
+    const url = `/api/cell-summary?date=${encodeURIComponent(date)}&cwd=${encodeURIComponent(cwd)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+    const cell = await resp.json();
+    cell.__date = date;
+    cell.project = cell.project || cwd;
+    replaceCellBlock(detailsEl, cwd, cell);
+  } catch (e) {
+    replaceCellBlock(detailsEl, cwd, {
+      project: cwd, cost: 0, activities: null,
+      error: e.message, eager: false, pending: false, __date: date,
+    });
+  }
+}
+
+function replaceCellBlock(detailsEl, cwd, cell) {
+  const body = detailsEl.querySelector('.day-body');
+  if (!body) return;
+  const blocks = body.querySelectorAll('.project-block');
+  for (const b of blocks) {
+    if (b.dataset.cwd === cwd) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderProjectBlock(cell);
+      b.replaceWith(tmp.firstElementChild);
+      return;
+    }
+  }
+}
+
 function renderProjectBlock(cell) {
   const star = cell.eager ? '<span class="star" title="Pre-summarized">&#x2605;</span>' : '';
+  const cwdAttr = `data-cwd="${escapeHtml(cell.project || '')}"`;
+  const head = `<div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${(cell.cost || 0).toFixed(2)}</span></div>`;
+  if (cell.pending) {
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
+      <p class="spinner">Summarizing…</p>
+    </div>`;
+  }
   if (cell.error === 'claude_not_installed') {
-    return `<div class="project-block">
-      <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
       <p class="err">Daily Activities requires the <code>claude</code> CLI on PATH.</p>
     </div>`;
   }
   if (cell.error) {
     const date = cell.__date || '';
-    return `<div class="project-block">
-      <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
       <p class="err">Summary unavailable: ${escapeHtml(cell.error)}
         <button onclick="retryDay('${escapeHtml(date)}')">Retry</button></p>
     </div>`;
   }
   if (!cell.activities || !cell.activities.length) {
-    return `<div class="project-block">
-      <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
       <p class="spinner">No activities inferred.</p>
     </div>`;
   }
   const bullets = cell.activities.map(a => `<li>${escapeHtml(a)}</li>`).join('');
-  return `<div class="project-block">
-    <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+  return `<div class="project-block" ${cwdAttr}>
+    ${head}
     <ul class="activities">${bullets}</ul>
   </div>`;
 }
@@ -1653,6 +1738,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             date = qs.get("date", [""])[0]
             data = get_daily_summaries(date)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/cell-summary":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            date = qs.get("date", [""])[0]
+            cwd = qs.get("cwd", [""])[0]
+            data = get_cell_summary(date, cwd)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

@@ -377,11 +377,14 @@ def test_api_daily_summaries_returns_cached_cells(tmp_path, monkeypatch):
     assert cells_by_proj["/p/B"]["activities"] == ["Did B"]
 
 
-def test_api_daily_summaries_triggers_lazy_summarization(tmp_path, monkeypatch):
+def test_api_daily_summaries_marks_uncached_cells_pending(tmp_path, monkeypatch):
+    """The day-level endpoint must NOT call summarize_cell — it returns
+    instantly and lets the client fetch each missing summary in parallel
+    via /api/cell-summary. This is the fix for the multi-minute
+    'Summarizing…' freeze when expanding a day."""
     import dashboard, summarizer
     db = tmp_path / "u.db"
     conn = get_db(db); init_db(conn); conn.close()
-    # One turn but no cached summary → triggers lazy path
     conn = sqlite3.connect(db)
     conn.execute("""
         INSERT INTO turns (session_id, timestamp, model, input_tokens, cwd)
@@ -391,16 +394,101 @@ def test_api_daily_summaries_triggers_lazy_summarization(tmp_path, monkeypatch):
     conn.close()
 
     called = {"count": 0}
-    def fake_summarize(date, cwd, cost_usd, db_path, projects_dirs, model=None):
+    def fake_summarize(**kw):
         called["count"] += 1
-        return {"activities": ["lazy result"], "cached": False, "error": None}
+        return {"activities": ["x"], "cached": False, "error": None}
     monkeypatch.setattr(summarizer, "summarize_cell", fake_summarize)
 
     response = dashboard.get_daily_summaries("2026-04-25", db_path=db,
                                               projects_dirs=[tmp_path])
-    assert called["count"] == 1
+    assert called["count"] == 0  # day endpoint must not run summaries
     cells_by_proj = {c["project"]: c for c in response["cells"]}
-    assert cells_by_proj["/p/A"]["activities"] == ["lazy result"]
+    assert cells_by_proj["/p/A"]["pending"] is True
+    assert cells_by_proj["/p/A"]["activities"] is None
+    assert cells_by_proj["/p/A"]["error"] is None
+
+
+def test_get_cell_summary_runs_summarize_for_missing_cell(tmp_path, monkeypatch):
+    """The per-cell endpoint is what triggers lazy summarization."""
+    import dashboard, summarizer
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        INSERT INTO turns (session_id, timestamp, model, input_tokens, cwd)
+        VALUES ('s1', '2026-04-25T10:00:00Z', 'claude-haiku-4-5', 1000000, '/p/A')
+    """)
+    conn.commit()
+    conn.close()
+
+    captured = {}
+    def fake_summarize(date, cwd, cost_usd, db_path, projects_dirs, model=None):
+        captured.update(date=date, cwd=cwd)
+        return {"activities": ["lazy result"], "cached": False, "error": None}
+    monkeypatch.setattr(summarizer, "summarize_cell", fake_summarize)
+
+    response = dashboard.get_cell_summary(
+        "2026-04-25", "/p/A", db_path=db, projects_dirs=[tmp_path],
+    )
+    assert captured == {"date": "2026-04-25", "cwd": "/p/A"}
+    assert response["activities"] == ["lazy result"]
+    assert response["error"] is None
+    assert response["pending"] is False
+    assert response["project"] == "/p/A"
+
+
+def test_get_cell_summary_returns_cached_without_running(tmp_path, monkeypatch):
+    import dashboard, summarizer
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        INSERT INTO daily_summaries
+          (summary_date, project_path, prompt_hash, activities, cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, ("2026-04-25", "/p/A", "h", json.dumps(["cached"]), 1.0, 0.0))
+    conn.commit()
+    conn.close()
+
+    def fail(**kw):
+        raise AssertionError("summarize_cell must not run for cached cells")
+    monkeypatch.setattr(summarizer, "summarize_cell", fail)
+
+    response = dashboard.get_cell_summary(
+        "2026-04-25", "/p/A", db_path=db, projects_dirs=[tmp_path],
+    )
+    assert response["activities"] == ["cached"]
+    assert response["error"] is None
+
+
+def test_cell_summary_endpoint_serves_json(tmp_path, monkeypatch):
+    """Smoke test that GET /api/cell-summary returns JSON for one cell."""
+    import dashboard, summarizer
+    from http.server import HTTPServer
+    import urllib.request, urllib.parse
+
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    monkeypatch.setattr(
+        summarizer, "summarize_cell",
+        lambda **kw: {"activities": ["x"], "cached": False, "error": None},
+    )
+
+    server = HTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        q = urllib.parse.urlencode({"date": "2026-04-25", "cwd": "/p/A"})
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/cell-summary?{q}",
+        ) as r:
+            body = json.loads(r.read())
+        assert body["project"] == "/p/A"
+        assert body["activities"] == ["x"]
+    finally:
+        server.shutdown()
 
 
 def test_api_daily_summaries_endpoint_serves_json(tmp_path, monkeypatch):
