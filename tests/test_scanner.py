@@ -763,5 +763,30 @@ def test_scan_without_callback_works_unchanged(tmp_path):
     assert "updated" in result
 
 
+def test_init_db_creates_daily_summaries_table(tmp_path):
+    import scanner
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_summaries)")}
+    assert cols == {
+        "summary_date", "project_path", "prompt_hash",
+        "activities", "cost_usd", "created_at",
+    }
+    conn.close()
+
+
+def test_init_db_daily_summaries_idempotent(tmp_path):
+    import scanner
+    db_path = tmp_path / "test.db"
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)
+    conn.close()
+    conn = scanner.get_db(db_path)
+    scanner.init_db(conn)  # second call must not raise
+    conn.execute("SELECT 1 FROM daily_summaries").fetchall()
+    conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

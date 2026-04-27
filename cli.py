@@ -390,7 +390,7 @@ def cmd_stats():
 def cmd_dashboard(projects_dir=None, host=None, port=None):
     import webbrowser
     import threading
-    import time
+    import time as _time
 
     print("Running scan first...")
     cmd_scan(projects_dir=projects_dir)
@@ -402,7 +402,7 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
     port = int(port or os.environ.get("PORT", "8080"))
 
     def open_browser():
-        time.sleep(1.0)
+        _time.sleep(1.0)
         webbrowser.open(f"http://{host}:{port}")
 
     t = threading.Thread(target=open_browser, daemon=True)

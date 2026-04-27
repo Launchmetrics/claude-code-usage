@@ -106,6 +106,7 @@ def get_dashboard_data(db_path=DB_PATH):
             duration_min = 0
         sessions_all.append({
             "session_id":    r["session_id"][:8],
+            "session_id_full": r["session_id"],
             "project":       r["project_name"] or "unknown",
             "branch":        r["git_branch"] or "",
             "last":          (r["last_timestamp"] or "")[:16].replace("T", " "),
@@ -141,6 +142,159 @@ def get_dashboard_data(db_path=DB_PATH):
         "last_scan_at":     last_scan_at,
         "data_age_seconds": data_age_seconds,
     }
+
+
+def _day_cell_costs_and_cached(date, db_path):
+    """Return (cell_costs: {cwd: usd}, cached: {cwd: activities}) for a
+    single date. Shared between the day-level and cell-level routes."""
+    from cli import calc_cost
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT cwd, model,
+                   SUM(input_tokens) AS inp,
+                   SUM(output_tokens) AS out,
+                   SUM(cache_read_tokens) AS cr,
+                   SUM(cache_creation_tokens) AS cw
+            FROM turns
+            WHERE substr(timestamp, 1, 10) = ?
+              AND cwd IS NOT NULL AND cwd != ''
+            GROUP BY cwd, model
+        """, (date,)).fetchall()
+        cell_costs = {}
+        for r in rows:
+            cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cw"] or 0)
+            cell_costs[r["cwd"]] = cell_costs.get(r["cwd"], 0.0) + cost
+
+        if _table_exists(conn, "daily_summaries"):
+            cached_rows = conn.execute("""
+                SELECT project_path, activities
+                FROM daily_summaries
+                WHERE summary_date = ?
+            """, (date,)).fetchall()
+            cached = {r["project_path"]: json.loads(r["activities"])
+                      for r in cached_rows}
+        else:
+            cached = {}
+    finally:
+        conn.close()
+    return cell_costs, cached
+
+
+def get_daily_summaries(date, db_path=None, projects_dirs=None):
+    """
+    Return the day's cell list immediately. Cached cells include their
+    activities; cells without a cached summary are returned with
+    pending=True so the client can fetch each one in parallel via
+    /api/cell-summary. This keeps the day-level endpoint instant and lets
+    summaries stream in instead of blocking on a sequential 30-60 s per
+    cell synchronous loop.
+    """
+    import scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not _date_is_valid(date):
+        return {"date": date, "cells": [], "error": "invalid_date"}
+
+    cell_costs, cached = _day_cell_costs_and_cached(date, db_path)
+    all_cwds = sorted(set(cell_costs.keys()) | set(cached.keys()))
+
+    cells = []
+    for cwd in all_cwds:
+        cost = cell_costs.get(cwd, 0.0)
+        if cwd in cached:
+            cells.append({
+                "project": cwd, "cost": round(cost, 4),
+                "activities": cached[cwd], "error": None,
+                "pending": False,
+            })
+        else:
+            cells.append({
+                "project": cwd, "cost": round(cost, 4),
+                "activities": None, "error": None,
+                "pending": True,
+            })
+    return {"date": date, "cells": cells}
+
+
+def get_session_summary(session_id, db_path=None, projects_dirs=None):
+    """
+    Run summarize_session for one session_id and return the activity bullets.
+    Mirrors get_cell_summary so the frontend can fetch per-row on expand.
+    """
+    import summarizer, scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not isinstance(session_id, str) or not session_id.strip():
+        return {"session_id": session_id, "error": "invalid_session_id"}
+    # Reject anything that doesn't look like a UUID-ish session id; the
+    # value is interpolated into a JSONL filename, so a path-traversal
+    # attempt here would otherwise let a request escape projects_dirs.
+    if not all(c.isalnum() or c in "-_" for c in session_id) or len(session_id) > 64:
+        return {"session_id": session_id, "error": "invalid_session_id"}
+    result = summarizer.summarize_session(
+        session_id=session_id,
+        db_path=db_path,
+        projects_dirs=projects_dirs,
+    )
+    return {
+        "session_id": session_id,
+        "activities": result["activities"],
+        "error": result["error"],
+        "pending": False,
+    }
+
+
+def get_cell_summary(date, cwd, db_path=None, projects_dirs=None):
+    """
+    Run summarize_cell for one (date, cwd) and return the single cell.
+    The day-level endpoint defers to this so the client can parallelize.
+    """
+    import summarizer, scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not _date_is_valid(date):
+        return {"date": date, "project": cwd, "error": "invalid_date"}
+    if not isinstance(cwd, str) or not cwd.strip():
+        return {"date": date, "project": cwd, "error": "invalid_cwd"}
+
+    cell_costs, cached = _day_cell_costs_and_cached(date, db_path)
+    cost = cell_costs.get(cwd, 0.0)
+
+    if cwd in cached:
+        return {
+            "date": date, "project": cwd, "cost": round(cost, 4),
+            "activities": cached[cwd], "error": None,
+            "pending": False,
+        }
+    result = summarizer.summarize_cell(
+        date=date, cwd=cwd, cost_usd=cost,
+        db_path=db_path, projects_dirs=projects_dirs,
+    )
+    return {
+        "date": date, "project": cwd, "cost": round(cost, 4),
+        "activities": result["activities"],
+        "error": result["error"],
+        "pending": False,
+    }
+
+
+def _date_is_valid(date):
+    if not isinstance(date, str) or len(date) != 10:
+        return False
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -235,6 +389,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .section-header .section-title { margin-bottom: 0; }
   .export-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; }
   .export-btn:hover { color: var(--text); border-color: var(--accent); }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  .pager button { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 3px 9px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
+  .pager button:not(:disabled):hover { border-color: var(--accent); }
+  tr.session-row { cursor: pointer; }
+  tr.session-row:hover td { background: var(--hover, rgba(255,255,255,0.03)); }
+  tr.session-detail-row td { background: var(--card); padding: 10px 14px 12px 38px; border-top: none; }
+  tr.session-detail-row .activities { margin: 0; padding-left: 18px; }
+  tr.session-detail-row .activities li { margin: 2px 0; }
+  tr.session-detail-row .spinner { color: var(--muted); font-style: italic; }
+  tr.session-detail-row .err { color: #c0392b; }
+  tr.session-detail-row .err button { margin-left: 8px; font-size: 0.85em; }
   .table-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; overflow-x: auto; }
 
   footer { border-top: 1px solid var(--border); padding: 20px 24px; margin-top: 8px; }
@@ -245,6 +411,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a:hover { text-decoration: underline; }
 
   @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
+
+#daily-activities { margin-top: 32px; }
+#daily-activities h2 { margin-bottom: 12px; }
+#daily-activities .day-row { border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; padding: 0; background: var(--card); }
+#daily-activities .day-row summary { padding: 10px 14px; cursor: pointer; font-weight: 500; display: flex; gap: 12px; align-items: center; }
+#daily-activities .day-row summary::-webkit-details-marker { display: none; }
+#daily-activities .day-row summary::before { content: "▶"; font-size: 0.7em; color: var(--muted); transition: transform 0.15s; }
+#daily-activities .day-row[open] summary::before { transform: rotate(90deg); }
+#daily-activities .day-meta { color: var(--muted); font-weight: normal; font-size: 0.9em; }
+#daily-activities .day-cost { margin-left: auto; font-variant-numeric: tabular-nums; }
+#daily-activities .project-block { padding: 8px 14px 8px 32px; border-top: 1px solid var(--border); }
+#daily-activities .project-name { font-weight: 500; display: flex; align-items: center; gap: 6px; }
+#daily-activities .project-cost { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
+#daily-activities ul.activities { margin: 6px 0 0 0; padding-left: 20px; }
+#daily-activities ul.activities li { margin: 2px 0; }
+#daily-activities .spinner { color: var(--muted); font-style: italic; padding: 4px 0; }
+#daily-activities .err { color: #c0392b; padding: 4px 0; }
+#daily-activities .err button { margin-left: 8px; font-size: 0.85em; }
+#daily-activities .banner { padding: 10px 14px; background: #fff3cd; border: 1px solid #ffe599; border-radius: 4px; margin-bottom: 12px; }
 </style>
 </head>
 <body>
@@ -328,6 +513,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="model-cost-body"></tbody>
     </table>
   </div>
+<section id="daily-activities">
+  <h2>Daily Activities</h2>
+  <div id="daily-banner" class="banner" style="display:none"></div>
+  <div id="daily-list">
+    <p class="spinner">Loading…</p>
+  </div>
+</section>
+
   <div class="table-card">
     <div class="section-header"><div class="section-title">Recent Sessions</div><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
     <table>
@@ -344,6 +537,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
+    <div id="sessions-pager" class="pager"></div>
   </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Cost by Project</div><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div>
@@ -413,6 +607,9 @@ let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
 let sessionSortDir = 'desc';
+const SESSIONS_PAGE_SIZE = 50;
+let sessionPage = 1;
+const sessionState = { fetched: new Set(), inFlight: new Set() };
 let hourlyTZ = 'local';  // 'local' or 'utc'
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
@@ -855,10 +1052,18 @@ function applyFilter() {
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
-  renderSessionsTable(lastFilteredSessions.slice(0, 20));
+  // Reset pagination when the underlying list changes (range/model
+  // filters, sort, auto-refresh) — keeping a stale page number could
+  // jump the user to an empty page.
+  sessionPage = 1;
+  renderSessionsPage();
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+  renderDailyList(buildDailyDataFromCharts({
+    sessions: lastFilteredSessions,
+    daily: filteredDaily,
+  }));
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
@@ -1051,13 +1256,19 @@ function renderProjectChart(byProject) {
   });
 }
 
-function renderSessionsTable(sessions) {
-  document.getElementById('sessions-body').innerHTML = sessions.map(s => {
+function renderSessionsPage() {
+  const total = lastFilteredSessions.length;
+  const totalPages = Math.max(1, Math.ceil(total / SESSIONS_PAGE_SIZE));
+  if (sessionPage > totalPages) sessionPage = totalPages;
+  const startIdx = (sessionPage - 1) * SESSIONS_PAGE_SIZE;
+  const slice = lastFilteredSessions.slice(startIdx, startIdx + SESSIONS_PAGE_SIZE);
+  document.getElementById('sessions-body').innerHTML = slice.map(s => {
     const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
-    return `<tr>
+    const fullId = s.session_id_full || '';
+    return `<tr class="session-row" data-id="${esc(fullId)}" onclick="toggleSessionRow('${esc(fullId)}')">
       <td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
@@ -1069,6 +1280,96 @@ function renderSessionsTable(sessions) {
       ${costCell}
     </tr>`;
   }).join('');
+  renderSessionsPager(totalPages, total);
+}
+
+function renderSessionsPager(totalPages, total) {
+  const pager = document.getElementById('sessions-pager');
+  if (!pager) return;
+  if (total === 0) { pager.innerHTML = ''; return; }
+  const startIdx = (sessionPage - 1) * SESSIONS_PAGE_SIZE + 1;
+  const endIdx = Math.min(sessionPage * SESSIONS_PAGE_SIZE, total);
+  pager.innerHTML = `
+    <span>${startIdx}\u2013${endIdx} of ${total}</span>
+    <button onclick="setSessionPage(1)" ${sessionPage === 1 ? 'disabled' : ''}>\u00ab</button>
+    <button onclick="setSessionPage(sessionPage - 1)" ${sessionPage === 1 ? 'disabled' : ''}>\u2039</button>
+    <span>Page ${sessionPage} / ${totalPages}</span>
+    <button onclick="setSessionPage(sessionPage + 1)" ${sessionPage >= totalPages ? 'disabled' : ''}>\u203a</button>
+    <button onclick="setSessionPage(${totalPages})" ${sessionPage >= totalPages ? 'disabled' : ''}>\u00bb</button>
+  `;
+}
+
+function setSessionPage(p) {
+  sessionPage = Math.max(1, p);
+  renderSessionsPage();
+}
+
+function toggleSessionRow(sessionId) {
+  if (!sessionId) return;
+  const row = document.querySelector(`tr.session-row[data-id="${sessionId}"]`);
+  if (!row) return;
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains('session-detail-row') && next.dataset.id === sessionId) {
+    next.remove();
+    return;
+  }
+  // Collapse any other open detail row first — keeping multiple rows
+  // expanded clutters the table and the user can only read one at a time.
+  document.querySelectorAll('tr.session-detail-row').forEach(r => r.remove());
+  const detail = document.createElement('tr');
+  detail.className = 'session-detail-row';
+  detail.dataset.id = sessionId;
+  detail.innerHTML = `<td colspan="9"><p class="spinner">Summarizing\u2026</p></td>`;
+  row.after(detail);
+  fetchSessionSummary(sessionId, detail);
+}
+
+async function fetchSessionSummary(sessionId, detailEl) {
+  if (sessionState.inFlight.has(sessionId)) return;
+  sessionState.inFlight.add(sessionId);
+  try {
+    const resp = await fetch('/api/session-summary?id=' + encodeURIComponent(sessionId));
+    const data = await resp.json();
+    renderSessionDetail(detailEl, sessionId, data);
+    sessionState.fetched.add(sessionId);
+  } catch (e) {
+    renderSessionDetail(detailEl, sessionId, { activities: null, error: e.message });
+  } finally {
+    sessionState.inFlight.delete(sessionId);
+  }
+}
+
+function renderSessionDetail(detailEl, sessionId, data) {
+  if (!detailEl || !detailEl.isConnected) return;
+  const td = detailEl.querySelector('td');
+  if (!td) return;
+  if (data.error === 'claude_not_installed') {
+    td.innerHTML = `<p class="err">Session summaries require the <code>claude</code> CLI on PATH.</p>`;
+    return;
+  }
+  if (data.error === 'no_prompts') {
+    td.innerHTML = `<p class="muted">No user prompts found for this session.</p>`;
+    return;
+  }
+  if (data.error) {
+    td.innerHTML = `<p class="err">Summary unavailable: ${esc(data.error)}
+      <button onclick="retrySessionSummary('${esc(sessionId)}')">Retry</button></p>`;
+    return;
+  }
+  const acts = data.activities || [];
+  if (!acts.length) {
+    td.innerHTML = `<p class="muted">No activities inferred.</p>`;
+    return;
+  }
+  td.innerHTML = `<ul class="activities">${acts.map(a => `<li>${esc(a)}</li>`).join('')}</ul>`;
+}
+
+function retrySessionSummary(sessionId) {
+  const detail = document.querySelector(`tr.session-detail-row[data-id="${sessionId}"]`);
+  if (!detail) return;
+  detail.querySelector('td').innerHTML = `<p class="spinner">Summarizing\u2026</p>`;
+  sessionState.fetched.delete(sessionId);
+  fetchSessionSummary(sessionId, detail);
 }
 
 function setModelSort(col) {
@@ -1397,6 +1698,205 @@ function scheduleAutoRefresh() {
 
 loadData();
 scheduleAutoRefresh();
+
+const dailyState = { fetchedDates: new Set(), inFlight: new Map() };
+
+function renderDailyList(data) {
+  const list = document.getElementById('daily-list');
+  if (!data.days.length) {
+    list.innerHTML = '<p class="spinner">No activity in the selected range.</p>';
+    dailyState.fetchedDates.clear();
+    dailyState.inFlight.clear();
+    return;
+  }
+  // Auto-refresh fires every 30 s when the range includes today. Rebuilding
+  // the whole list would collapse any open day and abandon in-flight
+  // /api/cell-summary requests, which is exactly the "it closes itself
+  // after a while + No activities inferred" bug. Update metadata in place
+  // for existing days; only build fresh DOM for genuinely new dates.
+  const newDates = new Set(data.days.map(d => d.date));
+  // Drop fetch state and DOM for dates that fell out of the range.
+  list.querySelectorAll('details.day-row').forEach(d => {
+    if (!newDates.has(d.dataset.date)) {
+      dailyState.fetchedDates.delete(d.dataset.date);
+      dailyState.inFlight.delete(d.dataset.date);
+      d.remove();
+    }
+  });
+  data.days.forEach((day, idx) => {
+    const existing = list.querySelector(
+      `details.day-row[data-date="${day.date}"]`,
+    );
+    if (existing) {
+      // Update summary metadata in place; do NOT touch the open state or
+      // the body, so any expanded day stays expanded with its rendered
+      // (or in-progress) cell blocks.
+      const summary = existing.querySelector('summary');
+      if (summary) {
+        summary.innerHTML = `
+          <span>${day.date}</span>
+          <span class="day-meta">${day.project_count} project${day.project_count === 1 ? '' : 's'}</span>
+          <span class="day-cost">$${day.cost.toFixed(2)}</span>
+        `;
+      }
+      // Reposition to keep the new sort order.
+      const ref = list.children[idx];
+      if (ref && ref !== existing) list.insertBefore(existing, ref);
+    } else {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = `
+        <details class="day-row" data-date="${day.date}">
+          <summary>
+            <span>${day.date}</span>
+            <span class="day-meta">${day.project_count} project${day.project_count === 1 ? '' : 's'}</span>
+            <span class="day-cost">$${day.cost.toFixed(2)}</span>
+          </summary>
+          <div class="day-body">
+            <p class="spinner">Click to load activities…</p>
+          </div>
+        </details>
+      `;
+      const node = tmp.firstElementChild;
+      node.addEventListener('toggle', () => {
+        if (node.open) loadDayActivities(node);
+      });
+      const ref = list.children[idx];
+      if (ref) list.insertBefore(node, ref); else list.appendChild(node);
+    }
+  });
+}
+
+async function loadDayActivities(detailsEl) {
+  const date = detailsEl.dataset.date;
+  if (dailyState.fetchedDates.has(date)) return;
+  if (dailyState.inFlight.has(date)) return;
+  dailyState.inFlight.set(date, true);
+  const body = detailsEl.querySelector('.day-body');
+  body.innerHTML = '<p class="spinner">Loading day…</p>';
+  try {
+    const resp = await fetch(`/api/daily-summaries?date=${encodeURIComponent(date)}`);
+    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+    const data = await resp.json();
+    data.cells.forEach(c => { c.__date = date; });
+    body.innerHTML = data.cells.map(c => renderProjectBlock(c)).join('');
+    dailyState.fetchedDates.add(date);
+    // Fire one /api/cell-summary per pending cell in parallel; replace the
+    // pending block as each one resolves so the user sees progress instead
+    // of one long blocking spinner.
+    data.cells.filter(c => c.pending).forEach(c => fetchCellSummary(detailsEl, date, c.project));
+  } catch (e) {
+    body.innerHTML = `<p class="err">Failed to load: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    dailyState.inFlight.delete(date);
+  }
+}
+
+async function fetchCellSummary(detailsEl, date, cwd) {
+  try {
+    const url = `/api/cell-summary?date=${encodeURIComponent(date)}&cwd=${encodeURIComponent(cwd)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+    const cell = await resp.json();
+    cell.__date = date;
+    cell.project = cell.project || cwd;
+    replaceCellBlock(detailsEl, cwd, cell);
+  } catch (e) {
+    replaceCellBlock(detailsEl, cwd, {
+      project: cwd, cost: 0, activities: null,
+      error: e.message, pending: false, __date: date,
+    });
+  }
+}
+
+function replaceCellBlock(detailsEl, cwd, cell) {
+  const body = detailsEl.querySelector('.day-body');
+  if (!body) return;
+  const blocks = body.querySelectorAll('.project-block');
+  for (const b of blocks) {
+    if (b.dataset.cwd === cwd) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderProjectBlock(cell);
+      b.replaceWith(tmp.firstElementChild);
+      return;
+    }
+  }
+}
+
+function renderProjectBlock(cell) {
+  const cwdAttr = `data-cwd="${escapeHtml(cell.project || '')}"`;
+  const head = `<div class="project-name">${escapeHtml(cell.project)}<span class="project-cost">$${(cell.cost || 0).toFixed(2)}</span></div>`;
+  if (cell.pending) {
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
+      <p class="spinner">Summarizing…</p>
+    </div>`;
+  }
+  if (cell.error === 'claude_not_installed') {
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
+      <p class="err">Daily Activities requires the <code>claude</code> CLI on PATH.</p>
+    </div>`;
+  }
+  if (cell.error) {
+    const date = cell.__date || '';
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
+      <p class="err">Summary unavailable: ${escapeHtml(cell.error)}
+        <button onclick="retryDay('${escapeHtml(date)}')">Retry</button></p>
+    </div>`;
+  }
+  if (!cell.activities || !cell.activities.length) {
+    return `<div class="project-block" ${cwdAttr}>
+      ${head}
+      <p class="spinner">No activities inferred.</p>
+    </div>`;
+  }
+  const bullets = cell.activities.map(a => `<li>${escapeHtml(a)}</li>`).join('');
+  return `<div class="project-block" ${cwdAttr}>
+    ${head}
+    <ul class="activities">${bullets}</ul>
+  </div>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function retryDay(date) {
+  dailyState.fetchedDates.delete(date);
+  const detailsEl = document.querySelector(
+    `#daily-list details.day-row[data-date="${date}"]`,
+  );
+  if (detailsEl && detailsEl.open) loadDayActivities(detailsEl);
+}
+
+function buildDailyDataFromCharts(rangeData) {
+  // Cost must be turn-based so the day header equals the sum of per-cell
+  // costs the user sees on expand. Session-based attribution credits an
+  // entire session to its last_date, which over-counts days that absorb
+  // turns from earlier days of the same session.
+  const dayMap = new Map();
+  for (const r of rangeData.daily || []) {
+    if (!r.day) continue;
+    if (!dayMap.has(r.day)) dayMap.set(r.day, { date: r.day, projects: new Set(), cost: 0 });
+    dayMap.get(r.day).cost += calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation);
+  }
+  // Sessions still drive the project count — the day header just shows
+  // how many distinct projects worked that day, which sessions express
+  // directly without needing per-turn cwd grouping.
+  for (const s of rangeData.sessions || []) {
+    const d = s.last_date;
+    if (!d) continue;
+    if (!dayMap.has(d)) dayMap.set(d, { date: d, projects: new Set(), cost: 0 });
+    dayMap.get(d).projects.add(s.project);
+  }
+  const days = Array.from(dayMap.values())
+    .map(d => ({ date: d.date, project_count: d.projects.size, cost: d.cost }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  return { days };
+}
 </script>
 </body>
 </html>
@@ -1417,6 +1917,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/data":
             data = get_dashboard_data()
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/daily-summaries":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            date = qs.get("date", [""])[0]
+            data = get_daily_summaries(date)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/cell-summary":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            date = qs.get("date", [""])[0]
+            cwd = qs.get("cwd", [""])[0]
+            data = get_cell_summary(date, cwd)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/session-summary":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            session_id = qs.get("id", [""])[0]
+            data = get_session_summary(session_id)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
