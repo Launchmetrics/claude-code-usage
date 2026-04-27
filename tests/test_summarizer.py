@@ -391,3 +391,141 @@ def test_summarize_cell_skips_when_no_prompts(tmp_path):
     assert result["error"] == "no_prompts"
     assert result["activities"] is None
     m.assert_not_called()
+
+
+# ── Session-level summaries ──────────────────────────────────────────────────
+
+
+def test_collect_session_prompts_finds_jsonl_via_cwd_hint(tmp_path):
+    """Fast path: when we know the session's cwd, build the path directly."""
+    proj_dir = tmp_path / "-Users-test-x"
+    proj_dir.mkdir()
+    sid = "abcd-1234"
+    _write_jsonl(proj_dir / f"{sid}.jsonl", [
+        {"type": "user", "sessionId": sid, "timestamp": "2026-04-25T10:00:00Z",
+         "message": {"content": "investigate the streaming bug"}},
+        {"type": "user", "sessionId": sid, "timestamp": "2026-04-25T10:01:00Z",
+         "message": {"content": "yes"}},  # noise — too short
+        {"type": "user", "sessionId": "other-session",
+         "timestamp": "2026-04-25T10:02:00Z",
+         "message": {"content": "wrong session, must be ignored"}},
+    ])
+    text = summarizer.collect_session_prompts(
+        session_id=sid,
+        cwd_hint="/Users/test/x",
+        projects_dirs=[tmp_path],
+    )
+    assert text == "investigate the streaming bug"
+
+
+def test_collect_session_prompts_falls_back_when_cwd_unknown(tmp_path):
+    """Slow path: glob every cwd dir for the session's jsonl."""
+    proj_dir = tmp_path / "-Users-test-y"
+    proj_dir.mkdir()
+    sid = "fallback-sid"
+    _write_jsonl(proj_dir / f"{sid}.jsonl", [
+        {"type": "user", "sessionId": sid, "timestamp": "2026-04-25T10:00:00Z",
+         "message": {"content": "wire up the calendar picker"}},
+    ])
+    text = summarizer.collect_session_prompts(
+        session_id=sid,
+        cwd_hint=None,
+        projects_dirs=[tmp_path],
+    )
+    assert text == "wire up the calendar picker"
+
+
+def test_collect_session_prompts_empty_for_unknown_session(tmp_path):
+    """Returns empty string when no jsonl matches."""
+    text = summarizer.collect_session_prompts(
+        session_id="does-not-exist",
+        cwd_hint="/Users/x/y",
+        projects_dirs=[tmp_path],
+    )
+    assert text == ""
+
+
+def test_summarize_session_caches_via_session_id(tmp_path):
+    """Second call with the same prompts should hit the cache."""
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+
+    proj_dir = tmp_path / "-Users-test-z"
+    proj_dir.mkdir()
+    sid = "cached-sid"
+    _write_jsonl(proj_dir / f"{sid}.jsonl", [
+        {"type": "user", "sessionId": sid, "timestamp": "2026-04-25T10:00:00Z",
+         "message": {"content": "make the dashboard fast"}},
+    ])
+    fake_response = json.dumps({"result": json.dumps(
+        {"activities": ["Improved dashboard performance"]}
+    )})
+    with patch("subprocess.run", return_value=_mock_claude_response(fake_response)) as m:
+        first = summarizer.summarize_session(
+            session_id=sid, db_path=db,
+            projects_dirs=[tmp_path], cwd_hint="/Users/test/z",
+        )
+        second = summarizer.summarize_session(
+            session_id=sid, db_path=db,
+            projects_dirs=[tmp_path], cwd_hint="/Users/test/z",
+        )
+    assert first["error"] is None
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["activities"] == ["Improved dashboard performance"]
+    assert m.call_count == 1
+
+
+def test_summarize_session_no_prompts_returns_error(tmp_path):
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    conn.close()
+    proj = tmp_path / "projects"
+    proj.mkdir()
+    with patch("subprocess.run") as m:
+        result = summarizer.summarize_session(
+            session_id="missing-session",
+            db_path=db, projects_dirs=[proj],
+            cwd_hint="/Users/x/empty",
+        )
+    assert result["error"] == "no_prompts"
+    m.assert_not_called()
+
+
+def test_summarize_session_looks_up_cwd_from_db_when_hint_omitted(tmp_path):
+    """If cwd_hint is None, summarize_session reads cwd from the turns table."""
+    import scanner
+    db = tmp_path / "u.db"
+    conn = scanner.get_db(db)
+    scanner.init_db(conn)
+    sid = "db-lookup-sid"
+    conn.execute("""
+        INSERT INTO turns (session_id, timestamp, model, input_tokens,
+                           output_tokens, cache_read_tokens,
+                           cache_creation_tokens, cwd)
+        VALUES (?, ?, 'claude-haiku-4-5', 100, 50, 0, 0, ?)
+    """, (sid, "2026-04-25T10:00:00Z", "/Users/test/looked-up"))
+    conn.commit()
+    conn.close()
+
+    proj_dir = tmp_path / "-Users-test-looked-up"
+    proj_dir.mkdir()
+    _write_jsonl(proj_dir / f"{sid}.jsonl", [
+        {"type": "user", "sessionId": sid, "timestamp": "2026-04-25T10:00:00Z",
+         "message": {"content": "expose the config endpoint"}},
+    ])
+    fake_response = json.dumps({"result": json.dumps(
+        {"activities": ["Exposed the config endpoint"]}
+    )})
+    with patch("subprocess.run", return_value=_mock_claude_response(fake_response)):
+        result = summarizer.summarize_session(
+            session_id=sid, db_path=db,
+            projects_dirs=[tmp_path], cwd_hint=None,
+        )
+    assert result["error"] is None
+    assert result["activities"] == ["Exposed the config endpoint"]

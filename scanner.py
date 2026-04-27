@@ -93,6 +93,13 @@ def init_db(conn):
             created_at    REAL NOT NULL,
             PRIMARY KEY (summary_date, project_path)
         );
+
+        CREATE TABLE IF NOT EXISTS session_summaries (
+            session_id    TEXT PRIMARY KEY,
+            prompt_hash   TEXT NOT NULL,
+            activities    TEXT NOT NULL,
+            created_at    REAL NOT NULL
+        );
     """)
     # Add message_id column if upgrading from older schema
     try:

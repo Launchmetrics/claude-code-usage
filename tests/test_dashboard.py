@@ -546,5 +546,73 @@ def test_api_daily_summaries_endpoint_handles_invalid_date(tmp_path, monkeypatch
         server.shutdown()
 
 
+def test_get_session_summary_returns_activities(tmp_path, monkeypatch):
+    """get_session_summary delegates to summarizer.summarize_session."""
+    import dashboard, summarizer
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    captured = {}
+    def fake_summarize_session(session_id, db_path, projects_dirs, **_):
+        captured["session_id"] = session_id
+        return {"activities": ["Built X", "Tested Y"], "cached": False, "error": None}
+    monkeypatch.setattr(summarizer, "summarize_session", fake_summarize_session)
+    result = dashboard.get_session_summary("real-session-id", projects_dirs=[tmp_path])
+    assert result["session_id"] == "real-session-id"
+    assert result["activities"] == ["Built X", "Tested Y"]
+    assert result["error"] is None
+    assert captured["session_id"] == "real-session-id"
+
+
+def test_get_session_summary_rejects_path_traversal(tmp_path, monkeypatch):
+    """Reject session_ids that contain path-traversal characters before
+    they reach summarize_session — the value gets interpolated into a
+    JSONL filename, so '..' or '/' would let a request escape the
+    projects directory."""
+    import dashboard, summarizer
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    called = {"count": 0}
+    def fake_summarize_session(**kw):
+        called["count"] += 1
+        return {"activities": [], "cached": False, "error": None}
+    monkeypatch.setattr(summarizer, "summarize_session", fake_summarize_session)
+    for bad in ["../etc/passwd", "abc/def", "with space", ""]:
+        result = dashboard.get_session_summary(bad, projects_dirs=[tmp_path])
+        assert result["error"] == "invalid_session_id"
+    assert called["count"] == 0
+
+
+def test_session_summary_endpoint_serves_json(tmp_path, monkeypatch):
+    """Smoke test the HTTP route end-to-end."""
+    import dashboard, summarizer
+    from http.server import HTTPServer
+    import urllib.request
+
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    monkeypatch.setattr(
+        summarizer, "summarize_session",
+        lambda **kw: {"activities": ["A1", "A2"], "cached": False, "error": None},
+    )
+
+    server = HTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/session-summary?id=09aedeeb-1470-48e6-857c-d04ab3ab21d1",
+        ) as r:
+            body = json.loads(r.read())
+        assert body["session_id"] == "09aedeeb-1470-48e6-857c-d04ab3ab21d1"
+        assert body["activities"] == ["A1", "A2"]
+        assert body["error"] is None
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

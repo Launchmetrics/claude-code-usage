@@ -106,6 +106,7 @@ def get_dashboard_data(db_path=DB_PATH):
             duration_min = 0
         sessions_all.append({
             "session_id":    r["session_id"][:8],
+            "session_id_full": r["session_id"],
             "project":       r["project_name"] or "unknown",
             "branch":        r["git_branch"] or "",
             "last":          (r["last_timestamp"] or "")[:16].replace("T", " "),
@@ -218,6 +219,36 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
                 "pending": True,
             })
     return {"date": date, "cells": cells}
+
+
+def get_session_summary(session_id, db_path=None, projects_dirs=None):
+    """
+    Run summarize_session for one session_id and return the activity bullets.
+    Mirrors get_cell_summary so the frontend can fetch per-row on expand.
+    """
+    import summarizer, scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not isinstance(session_id, str) or not session_id.strip():
+        return {"session_id": session_id, "error": "invalid_session_id"}
+    # Reject anything that doesn't look like a UUID-ish session id; the
+    # value is interpolated into a JSONL filename, so a path-traversal
+    # attempt here would otherwise let a request escape projects_dirs.
+    if not all(c.isalnum() or c in "-_" for c in session_id) or len(session_id) > 64:
+        return {"session_id": session_id, "error": "invalid_session_id"}
+    result = summarizer.summarize_session(
+        session_id=session_id,
+        db_path=db_path,
+        projects_dirs=projects_dirs,
+    )
+    return {
+        "session_id": session_id,
+        "activities": result["activities"],
+        "error": result["error"],
+        "pending": False,
+    }
 
 
 def get_cell_summary(date, cwd, db_path=None, projects_dirs=None):
@@ -358,6 +389,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .section-header .section-title { margin-bottom: 0; }
   .export-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; }
   .export-btn:hover { color: var(--text); border-color: var(--accent); }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  .pager button { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 3px 9px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
+  .pager button:not(:disabled):hover { border-color: var(--accent); }
+  tr.session-row { cursor: pointer; }
+  tr.session-row:hover td { background: var(--hover, rgba(255,255,255,0.03)); }
+  tr.session-detail-row td { background: var(--card); padding: 10px 14px 12px 38px; border-top: none; }
+  tr.session-detail-row .activities { margin: 0; padding-left: 18px; }
+  tr.session-detail-row .activities li { margin: 2px 0; }
+  tr.session-detail-row .spinner { color: var(--muted); font-style: italic; }
+  tr.session-detail-row .err { color: #c0392b; }
+  tr.session-detail-row .err button { margin-left: 8px; font-size: 0.85em; }
   .table-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; overflow-x: auto; }
 
   footer { border-top: 1px solid var(--border); padding: 20px 24px; margin-top: 8px; }
@@ -494,6 +537,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
+    <div id="sessions-pager" class="pager"></div>
   </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Cost by Project</div><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div>
@@ -563,6 +607,9 @@ let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
 let sessionSortDir = 'desc';
+const SESSIONS_PAGE_SIZE = 50;
+let sessionPage = 1;
+const sessionState = { fetched: new Set(), inFlight: new Set() };
 let hourlyTZ = 'local';  // 'local' or 'utc'
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
@@ -1005,7 +1052,11 @@ function applyFilter() {
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
-  renderSessionsTable(lastFilteredSessions.slice(0, 20));
+  // Reset pagination when the underlying list changes (range/model
+  // filters, sort, auto-refresh) — keeping a stale page number could
+  // jump the user to an empty page.
+  sessionPage = 1;
+  renderSessionsPage();
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
@@ -1205,13 +1256,19 @@ function renderProjectChart(byProject) {
   });
 }
 
-function renderSessionsTable(sessions) {
-  document.getElementById('sessions-body').innerHTML = sessions.map(s => {
+function renderSessionsPage() {
+  const total = lastFilteredSessions.length;
+  const totalPages = Math.max(1, Math.ceil(total / SESSIONS_PAGE_SIZE));
+  if (sessionPage > totalPages) sessionPage = totalPages;
+  const startIdx = (sessionPage - 1) * SESSIONS_PAGE_SIZE;
+  const slice = lastFilteredSessions.slice(startIdx, startIdx + SESSIONS_PAGE_SIZE);
+  document.getElementById('sessions-body').innerHTML = slice.map(s => {
     const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
-    return `<tr>
+    const fullId = s.session_id_full || '';
+    return `<tr class="session-row" data-id="${esc(fullId)}" onclick="toggleSessionRow('${esc(fullId)}')">
       <td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
@@ -1223,6 +1280,96 @@ function renderSessionsTable(sessions) {
       ${costCell}
     </tr>`;
   }).join('');
+  renderSessionsPager(totalPages, total);
+}
+
+function renderSessionsPager(totalPages, total) {
+  const pager = document.getElementById('sessions-pager');
+  if (!pager) return;
+  if (total === 0) { pager.innerHTML = ''; return; }
+  const startIdx = (sessionPage - 1) * SESSIONS_PAGE_SIZE + 1;
+  const endIdx = Math.min(sessionPage * SESSIONS_PAGE_SIZE, total);
+  pager.innerHTML = `
+    <span>${startIdx}\u2013${endIdx} of ${total}</span>
+    <button onclick="setSessionPage(1)" ${sessionPage === 1 ? 'disabled' : ''}>\u00ab</button>
+    <button onclick="setSessionPage(sessionPage - 1)" ${sessionPage === 1 ? 'disabled' : ''}>\u2039</button>
+    <span>Page ${sessionPage} / ${totalPages}</span>
+    <button onclick="setSessionPage(sessionPage + 1)" ${sessionPage >= totalPages ? 'disabled' : ''}>\u203a</button>
+    <button onclick="setSessionPage(${totalPages})" ${sessionPage >= totalPages ? 'disabled' : ''}>\u00bb</button>
+  `;
+}
+
+function setSessionPage(p) {
+  sessionPage = Math.max(1, p);
+  renderSessionsPage();
+}
+
+function toggleSessionRow(sessionId) {
+  if (!sessionId) return;
+  const row = document.querySelector(`tr.session-row[data-id="${sessionId}"]`);
+  if (!row) return;
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains('session-detail-row') && next.dataset.id === sessionId) {
+    next.remove();
+    return;
+  }
+  // Collapse any other open detail row first — keeping multiple rows
+  // expanded clutters the table and the user can only read one at a time.
+  document.querySelectorAll('tr.session-detail-row').forEach(r => r.remove());
+  const detail = document.createElement('tr');
+  detail.className = 'session-detail-row';
+  detail.dataset.id = sessionId;
+  detail.innerHTML = `<td colspan="9"><p class="spinner">Summarizing\u2026</p></td>`;
+  row.after(detail);
+  fetchSessionSummary(sessionId, detail);
+}
+
+async function fetchSessionSummary(sessionId, detailEl) {
+  if (sessionState.inFlight.has(sessionId)) return;
+  sessionState.inFlight.add(sessionId);
+  try {
+    const resp = await fetch('/api/session-summary?id=' + encodeURIComponent(sessionId));
+    const data = await resp.json();
+    renderSessionDetail(detailEl, sessionId, data);
+    sessionState.fetched.add(sessionId);
+  } catch (e) {
+    renderSessionDetail(detailEl, sessionId, { activities: null, error: e.message });
+  } finally {
+    sessionState.inFlight.delete(sessionId);
+  }
+}
+
+function renderSessionDetail(detailEl, sessionId, data) {
+  if (!detailEl || !detailEl.isConnected) return;
+  const td = detailEl.querySelector('td');
+  if (!td) return;
+  if (data.error === 'claude_not_installed') {
+    td.innerHTML = `<p class="err">Session summaries require the <code>claude</code> CLI on PATH.</p>`;
+    return;
+  }
+  if (data.error === 'no_prompts') {
+    td.innerHTML = `<p class="muted">No user prompts found for this session.</p>`;
+    return;
+  }
+  if (data.error) {
+    td.innerHTML = `<p class="err">Summary unavailable: ${esc(data.error)}
+      <button onclick="retrySessionSummary('${esc(sessionId)}')">Retry</button></p>`;
+    return;
+  }
+  const acts = data.activities || [];
+  if (!acts.length) {
+    td.innerHTML = `<p class="muted">No activities inferred.</p>`;
+    return;
+  }
+  td.innerHTML = `<ul class="activities">${acts.map(a => `<li>${esc(a)}</li>`).join('')}</ul>`;
+}
+
+function retrySessionSummary(sessionId) {
+  const detail = document.querySelector(`tr.session-detail-row[data-id="${sessionId}"]`);
+  if (!detail) return;
+  detail.querySelector('td').innerHTML = `<p class="spinner">Summarizing\u2026</p>`;
+  sessionState.fetched.delete(sessionId);
+  fetchSessionSummary(sessionId, detail);
 }
 
 function setModelSort(col) {
@@ -1795,6 +1942,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             date = qs.get("date", [""])[0]
             cwd = qs.get("cwd", [""])[0]
             data = get_cell_summary(date, cwd)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/session-summary":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            session_id = qs.get("id", [""])[0]
+            data = get_session_summary(session_id)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

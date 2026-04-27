@@ -6,8 +6,10 @@
 - Summaries are inferred lazily on demand: clicking a day fans out one `/api/cell-summary` request per project so they stream in parallel
 - Cache invalidated by sha256 hash of the day's user prompts
 - Day-row cost matches the sum of per-cell costs (turn-based attribution; sessions that span multiple days no longer pile onto their last day)
+- Recent Sessions table now paginates the full filtered list (50 per page) instead of capping at 20
+- Click a session row to expand inline activity bullets summarizing what happened in that session (cached via new `session_summaries` table)
 - New env var: `SUMMARY_MODEL` (default: `haiku`)
-- New `daily_summaries` table (auto-created via `CREATE TABLE IF NOT EXISTS`)
+- New `daily_summaries` and `session_summaries` tables (auto-created via `CREATE TABLE IF NOT EXISTS`)
 
 ## 2026-04-26
 

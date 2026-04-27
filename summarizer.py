@@ -232,6 +232,109 @@ def run_claude(prompt_text, model=None, timeout=SUBPROCESS_TIMEOUT):
     return [str(a) for a in activities if isinstance(a, (str, int, float))][:5], None
 
 
+def collect_session_prompts(session_id, cwd_hint, projects_dirs):
+    """
+    Collect type=user prompts for a single session. Claude Code names
+    JSONLs `<session_id>.jsonl` under the encoded-cwd directory, so we
+    locate the file directly when we know the session's cwd; if the cwd
+    isn't known we fall back to globbing every encoded-cwd directory.
+    Filters noise, dedupes exact matches, sorts for determinism, caps at
+    MAX_INPUT_BYTES.
+    """
+    target_files = []
+    if cwd_hint:
+        dirname = _encoded_dirname(cwd_hint)
+        for root in projects_dirs:
+            candidate = Path(root) / dirname / f"{session_id}.jsonl"
+            if candidate.exists():
+                target_files.append(candidate)
+    if not target_files:
+        # Slow path — scan every project dir for the session id.
+        for root in projects_dirs:
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            target_files.extend(root_path.glob(f"*/{session_id}.jsonl"))
+    prompts = set()
+    for jsonl in target_files:
+        try:
+            with jsonl.open() as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("type") != "user":
+                        continue
+                    if rec.get("sessionId") != session_id:
+                        continue
+                    text = _extract_prompt_text(rec)
+                    if not text or _is_noise(text):
+                        continue
+                    prompts.add(text.strip())
+        except OSError:
+            continue
+    if not prompts:
+        return ""
+    sorted_prompts = sorted(prompts)
+    out, size = [], 0
+    for p in sorted_prompts:
+        encoded = p.encode("utf-8")
+        if size + len(encoded) + 1 > MAX_INPUT_BYTES:
+            break
+        out.append(p)
+        size += len(encoded) + 1
+    return "\n".join(out)
+
+
+def summarize_session(session_id, db_path, projects_dirs, cwd_hint=None, model=None):
+    """
+    Orchestrate one session summary: look up cwd if not provided, collect
+    prompts, check cache, invoke claude if needed, persist result. Errors
+    are returned, not raised.
+    """
+    if cwd_hint is None:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT cwd FROM turns WHERE session_id=? "
+                "AND cwd IS NOT NULL AND cwd != '' LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            cwd_hint = row[0] if row else None
+        finally:
+            conn.close()
+    text = collect_session_prompts(session_id, cwd_hint, projects_dirs)
+    if not text:
+        return {"activities": None, "cached": False, "error": "no_prompts"}
+    h = prompt_hash(text)
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT prompt_hash, activities FROM session_summaries "
+            "WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if row is not None and row[0] == h:
+            return {
+                "activities": json.loads(row[1]),
+                "cached": True,
+                "error": None,
+            }
+        activities, err = run_claude(text, model=model)
+        if err is not None:
+            return {"activities": None, "cached": False, "error": err}
+        conn.execute("""
+            INSERT OR REPLACE INTO session_summaries
+              (session_id, prompt_hash, activities, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (session_id, h, json.dumps(activities), time.time()))
+        conn.commit()
+        return {"activities": activities, "cached": False, "error": None}
+    finally:
+        conn.close()
+
+
 def summarize_cell(date, cwd, cost_usd, db_path, projects_dirs, model=None):
     """
     Orchestrate one (date, cwd) summary: collect prompts, check cache,
