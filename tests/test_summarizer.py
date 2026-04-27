@@ -281,12 +281,19 @@ def test_run_claude_constructs_argv_correctly(monkeypatch):
     argv = m.call_args[0][0]
     assert argv[0] == "claude"
     assert "-p" in argv
-    assert "hello" in argv
+    # The user prompt is wrapped in a <prompts> block so the model treats
+    # it as data, not as an instruction directed at it.
+    p_index = argv.index("-p")
+    assert "<prompts>" in argv[p_index + 1] and "hello" in argv[p_index + 1]
     assert "--model" in argv and "haiku" in argv
     assert "--no-session-persistence" in argv
     assert "--disable-slash-commands" in argv
     assert "--output-format" in argv and "json" in argv
     assert "--system-prompt" in argv
+    # We no longer pass --json-schema; that flag returned an empty result
+    # field on the current Claude Code CLI. JSON shape is enforced via the
+    # system prompt and parsed from the result string instead.
+    assert "--json-schema" not in argv
 
 
 def test_run_claude_handles_file_not_found(monkeypatch):
