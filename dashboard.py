@@ -151,6 +151,7 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
     blocked while a lazy summary runs.
     """
     import summarizer, scanner
+    from cli import calc_cost
     if db_path is None:
         db_path = DB_PATH
     if projects_dirs is None:
@@ -173,7 +174,6 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
             GROUP BY cwd, model
         """, (date,)).fetchall()
         cell_costs = {}
-        from cli import calc_cost
         for r in rows:
             cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
                              r["cr"] or 0, r["cw"] or 0)

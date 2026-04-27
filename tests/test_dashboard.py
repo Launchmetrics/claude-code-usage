@@ -432,5 +432,31 @@ def test_api_daily_summaries_endpoint_serves_json(tmp_path, monkeypatch):
         server.shutdown()
 
 
+def test_api_daily_summaries_endpoint_handles_invalid_date(tmp_path, monkeypatch):
+    """Invalid ?date= query string should return 200 with error='invalid_date'."""
+    import dashboard
+    from http.server import HTTPServer
+    import urllib.request
+
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+
+    server = HTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/daily-summaries?date=not-a-date",
+        ) as r:
+            body = json.loads(r.read())
+        assert body["date"] == "not-a-date"
+        assert body["cells"] == []
+        assert body["error"] == "invalid_date"
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()
