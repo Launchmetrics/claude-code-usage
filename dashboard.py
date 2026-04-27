@@ -328,6 +328,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a:hover { text-decoration: underline; }
 
   @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
+
+#daily-activities { margin-top: 32px; }
+#daily-activities h2 { margin-bottom: 12px; }
+#daily-activities .day-row { border: 1px solid #e0e0e0; border-radius: 4px; margin-bottom: 8px; padding: 0; background: #fff; }
+#daily-activities .day-row summary { padding: 10px 14px; cursor: pointer; font-weight: 500; display: flex; gap: 12px; align-items: center; }
+#daily-activities .day-row summary::-webkit-details-marker { display: none; }
+#daily-activities .day-row summary::before { content: "▶"; font-size: 0.7em; color: #888; transition: transform 0.15s; }
+#daily-activities .day-row[open] summary::before { transform: rotate(90deg); }
+#daily-activities .day-meta { color: #888; font-weight: normal; font-size: 0.9em; }
+#daily-activities .day-cost { margin-left: auto; font-variant-numeric: tabular-nums; }
+#daily-activities .project-block { padding: 8px 14px 8px 32px; border-top: 1px solid #f0f0f0; }
+#daily-activities .project-name { font-weight: 500; display: flex; align-items: center; gap: 6px; }
+#daily-activities .project-cost { color: #888; font-variant-numeric: tabular-nums; margin-left: auto; }
+#daily-activities .star { color: #f5a623; }
+#daily-activities ul.activities { margin: 6px 0 0 0; padding-left: 20px; }
+#daily-activities ul.activities li { margin: 2px 0; }
+#daily-activities .spinner { color: #888; font-style: italic; padding: 4px 0; }
+#daily-activities .err { color: #c0392b; padding: 4px 0; }
+#daily-activities .err button { margin-left: 8px; font-size: 0.85em; }
+#daily-activities .banner { padding: 10px 14px; background: #fff3cd; border: 1px solid #ffe599; border-radius: 4px; margin-bottom: 12px; }
 </style>
 </head>
 <body>
@@ -411,6 +431,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="model-cost-body"></tbody>
     </table>
   </div>
+<section id="daily-activities">
+  <h2>Daily Activities</h2>
+  <div id="daily-banner" class="banner" style="display:none"></div>
+  <div id="daily-list">
+    <p class="spinner">Loading…</p>
+  </div>
+</section>
+
   <div class="table-card">
     <div class="section-header"><div class="section-title">Recent Sessions</div><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
     <table>
@@ -942,6 +970,7 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+  renderDailyList(buildDailyDataFromCharts({ sessions: lastFilteredSessions }));
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
@@ -1480,6 +1509,112 @@ function scheduleAutoRefresh() {
 
 loadData();
 scheduleAutoRefresh();
+
+const dailyState = { fetchedDates: new Set(), inFlight: new Map() };
+
+function renderDailyList(data) {
+  const list = document.getElementById('daily-list');
+  if (!data.days.length) {
+    list.innerHTML = '<p class="spinner">No activity in the selected range.</p>';
+    return;
+  }
+  list.innerHTML = data.days.map(day => `
+    <details class="day-row" data-date="${day.date}">
+      <summary>
+        <span>${day.date}</span>
+        <span class="day-meta">${day.project_count} project${day.project_count === 1 ? '' : 's'}</span>
+        <span class="day-cost">$${day.cost.toFixed(2)}</span>
+      </summary>
+      <div class="day-body">
+        <p class="spinner">Click to load activities…</p>
+      </div>
+    </details>
+  `).join('');
+  list.querySelectorAll('details.day-row').forEach(d => {
+    d.addEventListener('toggle', () => {
+      if (d.open) loadDayActivities(d);
+    });
+  });
+}
+
+async function loadDayActivities(detailsEl) {
+  const date = detailsEl.dataset.date;
+  if (dailyState.fetchedDates.has(date)) return;
+  if (dailyState.inFlight.has(date)) return;
+  dailyState.inFlight.set(date, true);
+  const body = detailsEl.querySelector('.day-body');
+  body.innerHTML = '<p class="spinner">Summarizing…</p>';
+  try {
+    const resp = await fetch(`/api/daily-summaries?date=${encodeURIComponent(date)}`);
+    const data = await resp.json();
+    data.cells.forEach(c => { c.__date = date; });
+    body.innerHTML = data.cells.map(c => renderProjectBlock(c)).join('');
+    dailyState.fetchedDates.add(date);
+  } catch (e) {
+    body.innerHTML = `<p class="err">Failed to load: ${e.message}</p>`;
+  } finally {
+    dailyState.inFlight.delete(date);
+  }
+}
+
+function renderProjectBlock(cell) {
+  const star = cell.eager ? '<span class="star" title="Pre-summarized">&#x2605;</span>' : '';
+  if (cell.error === 'claude_not_installed') {
+    return `<div class="project-block">
+      <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+      <p class="err">Daily Activities requires the <code>claude</code> CLI on PATH.</p>
+    </div>`;
+  }
+  if (cell.error) {
+    const date = cell.__date || '';
+    return `<div class="project-block">
+      <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+      <p class="err">Summary unavailable: ${escapeHtml(cell.error)}
+        <button onclick="retryDay('${escapeHtml(date)}')">Retry</button></p>
+    </div>`;
+  }
+  if (!cell.activities || !cell.activities.length) {
+    return `<div class="project-block">
+      <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+      <p class="spinner">No activities inferred.</p>
+    </div>`;
+  }
+  const bullets = cell.activities.map(a => `<li>${escapeHtml(a)}</li>`).join('');
+  return `<div class="project-block">
+    <div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${cell.cost.toFixed(2)}</span></div>
+    <ul class="activities">${bullets}</ul>
+  </div>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function retryDay(date) {
+  dailyState.fetchedDates.delete(date);
+  const detailsEl = document.querySelector(
+    `#daily-list details.day-row[data-date="${date}"]`,
+  );
+  if (detailsEl && detailsEl.open) loadDayActivities(detailsEl);
+}
+
+function buildDailyDataFromCharts(rangeData) {
+  const dayMap = new Map();
+  for (const s of rangeData.sessions || []) {
+    const d = s.last_date;
+    if (!d) continue;
+    if (!dayMap.has(d)) dayMap.set(d, { date: d, projects: new Set(), cost: 0 });
+    const day = dayMap.get(d);
+    day.projects.add(s.project);
+    day.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+  }
+  const days = Array.from(dayMap.values())
+    .map(d => ({ date: d.date, project_count: d.projects.size, cost: d.cost }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  return { days };
+}
 </script>
 </body>
 </html>
