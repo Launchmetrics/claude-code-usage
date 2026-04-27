@@ -144,9 +144,8 @@ def get_dashboard_data(db_path=DB_PATH):
 
 
 def _day_cell_costs_and_cached(date, db_path):
-    """Return (cell_costs: {cwd: usd}, cached: {cwd: activities}, eager_set)
-    for a single date. Shared between the day-level and cell-level routes."""
-    import summarizer
+    """Return (cell_costs: {cwd: usd}, cached: {cwd: activities}) for a
+    single date. Shared between the day-level and cell-level routes."""
     from cli import calc_cost
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -178,11 +177,9 @@ def _day_cell_costs_and_cached(date, db_path):
                       for r in cached_rows}
         else:
             cached = {}
-
-        eager_set = {(d, c) for d, c, _ in summarizer.rank_cells_by_cost(db_path)}
     finally:
         conn.close()
-    return cell_costs, cached, eager_set
+    return cell_costs, cached
 
 
 def get_daily_summaries(date, db_path=None, projects_dirs=None):
@@ -202,24 +199,23 @@ def get_daily_summaries(date, db_path=None, projects_dirs=None):
     if not _date_is_valid(date):
         return {"date": date, "cells": [], "error": "invalid_date"}
 
-    cell_costs, cached, eager_set = _day_cell_costs_and_cached(date, db_path)
+    cell_costs, cached = _day_cell_costs_and_cached(date, db_path)
     all_cwds = sorted(set(cell_costs.keys()) | set(cached.keys()))
 
     cells = []
     for cwd in all_cwds:
         cost = cell_costs.get(cwd, 0.0)
-        is_eager = (date, cwd) in eager_set
         if cwd in cached:
             cells.append({
                 "project": cwd, "cost": round(cost, 4),
                 "activities": cached[cwd], "error": None,
-                "eager": is_eager, "pending": False,
+                "pending": False,
             })
         else:
             cells.append({
                 "project": cwd, "cost": round(cost, 4),
                 "activities": None, "error": None,
-                "eager": is_eager, "pending": True,
+                "pending": True,
             })
     return {"date": date, "cells": cells}
 
@@ -239,15 +235,14 @@ def get_cell_summary(date, cwd, db_path=None, projects_dirs=None):
     if not isinstance(cwd, str) or not cwd.strip():
         return {"date": date, "project": cwd, "error": "invalid_cwd"}
 
-    cell_costs, cached, eager_set = _day_cell_costs_and_cached(date, db_path)
+    cell_costs, cached = _day_cell_costs_and_cached(date, db_path)
     cost = cell_costs.get(cwd, 0.0)
-    is_eager = (date, cwd) in eager_set
 
     if cwd in cached:
         return {
             "date": date, "project": cwd, "cost": round(cost, 4),
             "activities": cached[cwd], "error": None,
-            "eager": is_eager, "pending": False,
+            "pending": False,
         }
     result = summarizer.summarize_cell(
         date=date, cwd=cwd, cost_usd=cost,
@@ -257,7 +252,7 @@ def get_cell_summary(date, cwd, db_path=None, projects_dirs=None):
         "date": date, "project": cwd, "cost": round(cost, 4),
         "activities": result["activities"],
         "error": result["error"],
-        "eager": is_eager, "pending": False,
+        "pending": False,
     }
 
 
@@ -386,7 +381,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 #daily-activities .project-block { padding: 8px 14px 8px 32px; border-top: 1px solid var(--border); }
 #daily-activities .project-name { font-weight: 500; display: flex; align-items: center; gap: 6px; }
 #daily-activities .project-cost { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
-#daily-activities .star { color: #f5a623; }
 #daily-activities ul.activities { margin: 6px 0 0 0; padding-left: 20px; }
 #daily-activities ul.activities li { margin: 2px 0; }
 #daily-activities .spinner { color: var(--muted); font-style: italic; padding: 4px 0; }
@@ -1662,7 +1656,7 @@ async function fetchCellSummary(detailsEl, date, cwd) {
   } catch (e) {
     replaceCellBlock(detailsEl, cwd, {
       project: cwd, cost: 0, activities: null,
-      error: e.message, eager: false, pending: false, __date: date,
+      error: e.message, pending: false, __date: date,
     });
   }
 }
@@ -1682,9 +1676,8 @@ function replaceCellBlock(detailsEl, cwd, cell) {
 }
 
 function renderProjectBlock(cell) {
-  const star = cell.eager ? '<span class="star" title="Pre-summarized">&#x2605;</span>' : '';
   const cwdAttr = `data-cwd="${escapeHtml(cell.project || '')}"`;
-  const head = `<div class="project-name">${escapeHtml(cell.project)} ${star}<span class="project-cost">$${(cell.cost || 0).toFixed(2)}</span></div>`;
+  const head = `<div class="project-name">${escapeHtml(cell.project)}<span class="project-cost">$${(cell.cost || 0).toFixed(2)}</span></div>`;
   if (cell.pending) {
     return `<div class="project-block" ${cwdAttr}>
       ${head}

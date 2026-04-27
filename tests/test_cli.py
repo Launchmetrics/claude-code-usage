@@ -4,14 +4,6 @@ import unittest
 from cli import get_pricing, calc_cost, fmt, fmt_cost, PRICING
 
 
-class _FakeThread:
-    """Stub for threading.Thread — prevents the browser-open daemon from running."""
-    def __init__(self, target=None, daemon=None):
-        pass
-    def start(self):
-        pass
-
-
 class TestGetPricing(unittest.TestCase):
     def test_exact_model_match(self):
         p = get_pricing("claude-opus-4-6")
@@ -229,66 +221,3 @@ def test_cmd_scan_progress_non_tty_uses_newlines(tmp_path, monkeypatch):
 
     output = fake_err.getvalue()
     assert "\r" not in output, f"non-TTY output should not contain carriage returns: {output!r}"
-
-
-def test_cmd_dashboard_runs_eager_summarizer_pass(tmp_path, monkeypatch, capsys):
-    """cmd_dashboard should call summarizer.run_eager_pass after the scan."""
-    import cli, summarizer
-    db = tmp_path / "u.db"
-    proj = tmp_path / "projects"
-    proj.mkdir()
-    monkeypatch.setattr(cli, "DB_PATH", db)
-
-    # Stub cmd_scan, serve, and webbrowser so we don't scan, start a server,
-    # or open a browser tab on the developer's machine
-    monkeypatch.setattr(cli, "cmd_scan", lambda **kw: None)
-    monkeypatch.setattr(
-        "dashboard.serve",
-        lambda host=None, port=None: None,
-        raising=False,
-    )
-    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: None)
-    monkeypatch.setattr("threading.Thread", _FakeThread)
-
-    called = {"count": 0, "args": None}
-    def fake_eager(db_path, projects_dirs, progress_callback=None):
-        called["count"] += 1
-        called["args"] = (db_path, projects_dirs)
-        if progress_callback:
-            progress_callback(1, 1)
-        return {"summarized": 1, "skipped": 0, "errors": 0}
-    monkeypatch.setattr(summarizer, "run_eager_pass", fake_eager)
-
-    cli.cmd_dashboard(projects_dir=str(proj))
-    assert called["count"] == 1
-    assert called["args"][0] == db
-    assert called["args"][1] == [str(proj)]
-
-
-def test_cmd_dashboard_eager_pass_writes_progress_to_stderr(monkeypatch, capsys, tmp_path):
-    """Non-TTY (capsys) progress should write newline-separated lines, not \r."""
-    import cli, summarizer
-    db = tmp_path / "u.db"
-    proj = tmp_path / "projects"
-    proj.mkdir()
-    monkeypatch.setattr(cli, "DB_PATH", db)
-    monkeypatch.setattr(cli, "cmd_scan", lambda **kw: None)
-    monkeypatch.setattr(
-        "dashboard.serve",
-        lambda host=None, port=None: None,
-        raising=False,
-    )
-    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: None)
-    monkeypatch.setattr("threading.Thread", _FakeThread)
-    def fake_eager(db_path, projects_dirs, progress_callback=None):
-        progress_callback(1, 3)
-        progress_callback(2, 3)
-        progress_callback(3, 3)
-        return {"summarized": 3, "skipped": 0, "errors": 0}
-    monkeypatch.setattr(summarizer, "run_eager_pass", fake_eager)
-
-    cli.cmd_dashboard(projects_dir=str(proj))
-    captured = capsys.readouterr()
-    assert "Summarizing" in captured.err
-    assert "1 / 3" in captured.err
-    assert "\r" not in captured.err

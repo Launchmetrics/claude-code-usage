@@ -33,8 +33,6 @@ NOISE_PREFIXES = (
 )
 MIN_PROMPT_LENGTH = 5
 MAX_INPUT_BYTES = 4096
-DEFAULT_MAX_CELLS = 50
-DEFAULT_PERCENTILE = 80
 DEFAULT_MODEL = "haiku"
 SUBPROCESS_TIMEOUT = 60
 
@@ -161,60 +159,6 @@ def collect_prompts(date: str, cwd: str, projects_dirs) -> str:
     return "\n".join(out)
 
 
-def rank_cells_by_cost(db_path, max_cells=None, percentile=None):
-    """
-    Returns a sorted list of (date, cwd, cost_usd) tuples for the eager set —
-    cells whose cost is at or above the Nth-percentile threshold, capped at
-    max_cells, sorted descending by cost. Skips cells with cost == 0
-    (unknown models).
-
-    Percentile semantics (consistent with NumPy's default linear interpolation):
-      • percentile=0   → returns all positive-cost cells (then capped).
-      • percentile=80  → returns roughly the top 20% (default).
-      • percentile=100 → returns only cells tied at the maximum cost.
-    """
-    if max_cells is None:
-        max_cells = int(os.environ.get("SUMMARY_MAX_CELLS", str(DEFAULT_MAX_CELLS)))
-    if percentile is None:
-        percentile = DEFAULT_PERCENTILE
-    from cli import calc_cost
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("""
-        SELECT
-            substr(timestamp, 1, 10) AS day,
-            cwd,
-            model,
-            input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens
-        FROM turns
-        WHERE cwd IS NOT NULL AND cwd != ''
-    """).fetchall()
-    conn.close()
-    cells = {}
-    for r in rows:
-        cost = calc_cost(
-            r["model"],
-            r["input_tokens"] or 0,
-            r["output_tokens"] or 0,
-            r["cache_read_tokens"] or 0,
-            r["cache_creation_tokens"] or 0,
-        )
-        if cost <= 0:
-            continue
-        key = (r["day"], r["cwd"])
-        cells[key] = cells.get(key, 0.0) + cost
-    items = [(d, c, cost) for (d, c), cost in cells.items() if cost > 0]
-    if not items:
-        return []
-    costs = sorted(cost for _, _, cost in items)
-    pct_idx = min(int(len(costs) * (percentile / 100)), len(costs) - 1)
-    threshold = costs[pct_idx]
-    eager = [item for item in items if item[2] >= threshold]
-    eager.sort(key=lambda c: -c[2])
-    return eager[:max_cells]
-
-
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
@@ -323,27 +267,3 @@ def summarize_cell(date, cwd, cost_usd, db_path, projects_dirs, model=None):
         return {"activities": activities, "cached": False, "error": None}
     finally:
         conn.close()
-
-
-def run_eager_pass(db_path, projects_dirs, progress_callback=None):
-    """
-    Summarize the eager set: top-20% (date, cwd) cells by cost, capped at
-    SUMMARY_MAX_CELLS. Returns a dict with summary counts.
-    """
-    cells = rank_cells_by_cost(db_path)
-    total = len(cells)
-    counts = {"summarized": 0, "skipped": 0, "errors": 0}
-    for i, (date, cwd, cost) in enumerate(cells, start=1):
-        result = summarize_cell(
-            date=date, cwd=cwd, cost_usd=cost,
-            db_path=db_path, projects_dirs=projects_dirs,
-        )
-        if result["error"]:
-            counts["errors"] += 1
-        elif result["cached"]:
-            counts["skipped"] += 1
-        else:
-            counts["summarized"] += 1
-        if progress_callback is not None:
-            progress_callback(i, total)
-    return counts

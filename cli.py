@@ -391,36 +391,9 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
     import webbrowser
     import threading
     import time as _time
-    import scanner, summarizer
 
     print("Running scan first...")
     cmd_scan(projects_dir=projects_dir)
-
-    print("\nGenerating activity summaries...")
-    is_tty = sys.stderr.isatty()
-    def progress(done, total):
-        if total == 0:
-            return
-        if is_tty:
-            pct = 100 * done // total
-            sys.stderr.write(f"\rSummarizing\u2026 {done} / {total} cells ({pct}%)")
-            sys.stderr.flush()
-        else:
-            # Log every 5 cells (≈10% with default cap of 50)
-            if done == 1 or done == total or done % 5 == 0:
-                sys.stderr.write(f"Summarizing\u2026 {done} / {total} cells\n")
-    projects_dirs = (
-        [projects_dir] if projects_dir else scanner.DEFAULT_PROJECTS_DIRS
-    )
-    counts = summarizer.run_eager_pass(
-        db_path=DB_PATH,
-        projects_dirs=projects_dirs,
-        progress_callback=progress,
-    )
-    if is_tty:
-        sys.stderr.write("\n")
-    print(f"  {counts['summarized']} summarized, "
-          f"{counts['skipped']} cached, {counts['errors']} errors")
 
     print("\nStarting dashboard server...")
     from dashboard import serve

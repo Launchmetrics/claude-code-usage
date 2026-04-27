@@ -3,10 +3,10 @@
 ## 2026-04-27
 
 - Add Daily Activities view: per-day, per-project bulleted activity summaries inferred by Haiku via the local `claude` CLI
-- Eager pass at dashboard startup summarizes top-20% (day, project) cells by cost (capped at 50)
-- Lazy pass on `/api/daily-summaries?date=…` summarizes other days on demand when expanded
+- Summaries are inferred lazily on demand: clicking a day fans out one `/api/cell-summary` request per project so they stream in parallel
 - Cache invalidated by sha256 hash of the day's user prompts
-- New env vars: `SUMMARY_MODEL` (default: `haiku`), `SUMMARY_MAX_CELLS` (default: `50`)
+- Day-row cost matches the sum of per-cell costs (turn-based attribution; sessions that span multiple days no longer pile onto their last day)
+- New env var: `SUMMARY_MODEL` (default: `haiku`)
 - New `daily_summaries` table (auto-created via `CREATE TABLE IF NOT EXISTS`)
 
 ## 2026-04-26
