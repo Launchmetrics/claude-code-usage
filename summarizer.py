@@ -253,3 +253,27 @@ def summarize_cell(date, cwd, cost_usd, db_path, projects_dirs, model=None):
         return {"activities": activities, "cached": False, "error": None}
     finally:
         conn.close()
+
+
+def run_eager_pass(db_path, projects_dirs, progress_callback=None):
+    """
+    Summarize the eager set: top-20% (date, cwd) cells by cost, capped at
+    SUMMARY_MAX_CELLS. Returns a dict with summary counts.
+    """
+    cells = rank_cells_by_cost(db_path)
+    total = len(cells)
+    counts = {"summarized": 0, "skipped": 0, "errors": 0}
+    for i, (date, cwd, cost) in enumerate(cells, start=1):
+        result = summarize_cell(
+            date=date, cwd=cwd, cost_usd=cost,
+            db_path=db_path, projects_dirs=projects_dirs,
+        )
+        if result["error"]:
+            counts["errors"] += 1
+        elif result["cached"]:
+            counts["skipped"] += 1
+        else:
+            counts["summarized"] += 1
+        if progress_callback is not None:
+            progress_callback(i, total)
+    return counts
