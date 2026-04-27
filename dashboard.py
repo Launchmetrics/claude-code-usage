@@ -1558,29 +1558,67 @@ scheduleAutoRefresh();
 const dailyState = { fetchedDates: new Set(), inFlight: new Map() };
 
 function renderDailyList(data) {
-  dailyState.fetchedDates.clear();
-  dailyState.inFlight.clear();
   const list = document.getElementById('daily-list');
   if (!data.days.length) {
     list.innerHTML = '<p class="spinner">No activity in the selected range.</p>';
+    dailyState.fetchedDates.clear();
+    dailyState.inFlight.clear();
     return;
   }
-  list.innerHTML = data.days.map(day => `
-    <details class="day-row" data-date="${day.date}">
-      <summary>
-        <span>${day.date}</span>
-        <span class="day-meta">${day.project_count} project${day.project_count === 1 ? '' : 's'}</span>
-        <span class="day-cost">$${day.cost.toFixed(2)}</span>
-      </summary>
-      <div class="day-body">
-        <p class="spinner">Click to load activities…</p>
-      </div>
-    </details>
-  `).join('');
+  // Auto-refresh fires every 30 s when the range includes today. Rebuilding
+  // the whole list would collapse any open day and abandon in-flight
+  // /api/cell-summary requests, which is exactly the "it closes itself
+  // after a while + No activities inferred" bug. Update metadata in place
+  // for existing days; only build fresh DOM for genuinely new dates.
+  const newDates = new Set(data.days.map(d => d.date));
+  // Drop fetch state and DOM for dates that fell out of the range.
   list.querySelectorAll('details.day-row').forEach(d => {
-    d.addEventListener('toggle', () => {
-      if (d.open) loadDayActivities(d);
-    });
+    if (!newDates.has(d.dataset.date)) {
+      dailyState.fetchedDates.delete(d.dataset.date);
+      dailyState.inFlight.delete(d.dataset.date);
+      d.remove();
+    }
+  });
+  data.days.forEach((day, idx) => {
+    const existing = list.querySelector(
+      `details.day-row[data-date="${day.date}"]`,
+    );
+    if (existing) {
+      // Update summary metadata in place; do NOT touch the open state or
+      // the body, so any expanded day stays expanded with its rendered
+      // (or in-progress) cell blocks.
+      const summary = existing.querySelector('summary');
+      if (summary) {
+        summary.innerHTML = `
+          <span>${day.date}</span>
+          <span class="day-meta">${day.project_count} project${day.project_count === 1 ? '' : 's'}</span>
+          <span class="day-cost">$${day.cost.toFixed(2)}</span>
+        `;
+      }
+      // Reposition to keep the new sort order.
+      const ref = list.children[idx];
+      if (ref && ref !== existing) list.insertBefore(existing, ref);
+    } else {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = `
+        <details class="day-row" data-date="${day.date}">
+          <summary>
+            <span>${day.date}</span>
+            <span class="day-meta">${day.project_count} project${day.project_count === 1 ? '' : 's'}</span>
+            <span class="day-cost">$${day.cost.toFixed(2)}</span>
+          </summary>
+          <div class="day-body">
+            <p class="spinner">Click to load activities…</p>
+          </div>
+        </details>
+      `;
+      const node = tmp.firstElementChild;
+      node.addEventListener('toggle', () => {
+        if (node.open) loadDayActivities(node);
+      });
+      const ref = list.children[idx];
+      if (ref) list.insertBefore(node, ref); else list.appendChild(node);
+    }
   });
 }
 
