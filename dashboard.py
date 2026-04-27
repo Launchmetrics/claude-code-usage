@@ -331,20 +331,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 #daily-activities { margin-top: 32px; }
 #daily-activities h2 { margin-bottom: 12px; }
-#daily-activities .day-row { border: 1px solid #e0e0e0; border-radius: 4px; margin-bottom: 8px; padding: 0; background: #fff; }
+#daily-activities .day-row { border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; padding: 0; background: var(--card); }
 #daily-activities .day-row summary { padding: 10px 14px; cursor: pointer; font-weight: 500; display: flex; gap: 12px; align-items: center; }
 #daily-activities .day-row summary::-webkit-details-marker { display: none; }
-#daily-activities .day-row summary::before { content: "▶"; font-size: 0.7em; color: #888; transition: transform 0.15s; }
+#daily-activities .day-row summary::before { content: "▶"; font-size: 0.7em; color: var(--muted); transition: transform 0.15s; }
 #daily-activities .day-row[open] summary::before { transform: rotate(90deg); }
-#daily-activities .day-meta { color: #888; font-weight: normal; font-size: 0.9em; }
+#daily-activities .day-meta { color: var(--muted); font-weight: normal; font-size: 0.9em; }
 #daily-activities .day-cost { margin-left: auto; font-variant-numeric: tabular-nums; }
-#daily-activities .project-block { padding: 8px 14px 8px 32px; border-top: 1px solid #f0f0f0; }
+#daily-activities .project-block { padding: 8px 14px 8px 32px; border-top: 1px solid var(--border); }
 #daily-activities .project-name { font-weight: 500; display: flex; align-items: center; gap: 6px; }
-#daily-activities .project-cost { color: #888; font-variant-numeric: tabular-nums; margin-left: auto; }
+#daily-activities .project-cost { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
 #daily-activities .star { color: #f5a623; }
 #daily-activities ul.activities { margin: 6px 0 0 0; padding-left: 20px; }
 #daily-activities ul.activities li { margin: 2px 0; }
-#daily-activities .spinner { color: #888; font-style: italic; padding: 4px 0; }
+#daily-activities .spinner { color: var(--muted); font-style: italic; padding: 4px 0; }
 #daily-activities .err { color: #c0392b; padding: 4px 0; }
 #daily-activities .err button { margin-left: 8px; font-size: 0.85em; }
 #daily-activities .banner { padding: 10px 14px; background: #fff3cd; border: 1px solid #ffe599; border-radius: 4px; margin-bottom: 12px; }
@@ -1513,6 +1513,8 @@ scheduleAutoRefresh();
 const dailyState = { fetchedDates: new Set(), inFlight: new Map() };
 
 function renderDailyList(data) {
+  dailyState.fetchedDates.clear();
+  dailyState.inFlight.clear();
   const list = document.getElementById('daily-list');
   if (!data.days.length) {
     list.innerHTML = '<p class="spinner">No activity in the selected range.</p>';
@@ -1546,12 +1548,13 @@ async function loadDayActivities(detailsEl) {
   body.innerHTML = '<p class="spinner">Summarizing…</p>';
   try {
     const resp = await fetch(`/api/daily-summaries?date=${encodeURIComponent(date)}`);
+    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
     const data = await resp.json();
     data.cells.forEach(c => { c.__date = date; });
     body.innerHTML = data.cells.map(c => renderProjectBlock(c)).join('');
     dailyState.fetchedDates.add(date);
   } catch (e) {
-    body.innerHTML = `<p class="err">Failed to load: ${e.message}</p>`;
+    body.innerHTML = `<p class="err">Failed to load: ${escapeHtml(e.message)}</p>`;
   } finally {
     dailyState.inFlight.delete(date);
   }
