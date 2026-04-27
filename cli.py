@@ -406,6 +406,7 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
             sys.stderr.write(f"\rSummarizing\u2026 {done} / {total} cells ({pct}%)")
             sys.stderr.flush()
         else:
+            # Log every 5 cells (≈10% with default cap of 50)
             if done == 1 or done == total or done % 5 == 0:
                 sys.stderr.write(f"Summarizing\u2026 {done} / {total} cells\n")
     projects_dirs = (

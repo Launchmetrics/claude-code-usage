@@ -4,6 +4,14 @@ import unittest
 from cli import get_pricing, calc_cost, fmt, fmt_cost, PRICING
 
 
+class _FakeThread:
+    """Stub for threading.Thread — prevents the browser-open daemon from running."""
+    def __init__(self, target=None, daemon=None):
+        pass
+    def start(self):
+        pass
+
+
 class TestGetPricing(unittest.TestCase):
     def test_exact_model_match(self):
         p = get_pricing("claude-opus-4-6")
@@ -240,6 +248,7 @@ def test_cmd_dashboard_runs_eager_summarizer_pass(tmp_path, monkeypatch, capsys)
         raising=False,
     )
     monkeypatch.setattr("webbrowser.open", lambda *a, **kw: None)
+    monkeypatch.setattr("threading.Thread", _FakeThread)
 
     called = {"count": 0, "args": None}
     def fake_eager(db_path, projects_dirs, progress_callback=None):
@@ -253,9 +262,11 @@ def test_cmd_dashboard_runs_eager_summarizer_pass(tmp_path, monkeypatch, capsys)
     cli.cmd_dashboard(projects_dir=str(proj))
     assert called["count"] == 1
     assert called["args"][0] == db
+    assert called["args"][1] == [str(proj)]
 
 
 def test_cmd_dashboard_eager_pass_writes_progress_to_stderr(monkeypatch, capsys, tmp_path):
+    """Non-TTY (capsys) progress should write newline-separated lines, not \r."""
     import cli, summarizer
     db = tmp_path / "u.db"
     proj = tmp_path / "projects"
@@ -268,6 +279,7 @@ def test_cmd_dashboard_eager_pass_writes_progress_to_stderr(monkeypatch, capsys,
         raising=False,
     )
     monkeypatch.setattr("webbrowser.open", lambda *a, **kw: None)
+    monkeypatch.setattr("threading.Thread", _FakeThread)
     def fake_eager(db_path, projects_dirs, progress_callback=None):
         progress_callback(1, 3)
         progress_callback(2, 3)
@@ -278,3 +290,5 @@ def test_cmd_dashboard_eager_pass_writes_progress_to_stderr(monkeypatch, capsys,
     cli.cmd_dashboard(projects_dir=str(proj))
     captured = capsys.readouterr()
     assert "Summarizing" in captured.err
+    assert "1 / 3" in captured.err
+    assert "\r" not in captured.err
