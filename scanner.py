@@ -83,6 +83,16 @@ def init_db(conn):
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS daily_summaries (
+            summary_date  TEXT NOT NULL,
+            project_path  TEXT NOT NULL,
+            prompt_hash   TEXT NOT NULL,
+            activities    TEXT NOT NULL,
+            cost_usd      REAL NOT NULL,
+            created_at    REAL NOT NULL,
+            PRIMARY KEY (summary_date, project_path)
+        );
     """)
     # Add message_id column if upgrading from older schema
     try:
