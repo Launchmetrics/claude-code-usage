@@ -1015,7 +1015,10 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
-  renderDailyList(buildDailyDataFromCharts({ sessions: lastFilteredSessions }));
+  renderDailyList(buildDailyDataFromCharts({
+    sessions: lastFilteredSessions,
+    daily: filteredDaily,
+  }));
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
@@ -1730,14 +1733,24 @@ function retryDay(date) {
 }
 
 function buildDailyDataFromCharts(rangeData) {
+  // Cost must be turn-based so the day header equals the sum of per-cell
+  // costs the user sees on expand. Session-based attribution credits an
+  // entire session to its last_date, which over-counts days that absorb
+  // turns from earlier days of the same session.
   const dayMap = new Map();
+  for (const r of rangeData.daily || []) {
+    if (!r.day) continue;
+    if (!dayMap.has(r.day)) dayMap.set(r.day, { date: r.day, projects: new Set(), cost: 0 });
+    dayMap.get(r.day).cost += calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation);
+  }
+  // Sessions still drive the project count — the day header just shows
+  // how many distinct projects worked that day, which sessions express
+  // directly without needing per-turn cwd grouping.
   for (const s of rangeData.sessions || []) {
     const d = s.last_date;
     if (!d) continue;
     if (!dayMap.has(d)) dayMap.set(d, { date: d, projects: new Set(), cost: 0 });
-    const day = dayMap.get(d);
-    day.projects.add(s.project);
-    day.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    dayMap.get(d).projects.add(s.project);
   }
   const days = Array.from(dayMap.values())
     .map(d => ({ date: d.date, project_count: d.projects.size, cost: d.cost }))
