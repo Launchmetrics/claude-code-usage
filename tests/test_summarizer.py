@@ -196,3 +196,76 @@ def test_rank_cells_percentile_zero_returns_all_positive(tmp_path):
     ])
     cells = summarizer.rank_cells_by_cost(db, max_cells=10, percentile=0)
     assert len(cells) == 3
+
+
+import subprocess
+from unittest.mock import patch, MagicMock
+
+
+def _mock_claude_response(stdout, returncode=0):
+    return MagicMock(returncode=returncode, stdout=stdout, stderr="")
+
+
+def test_run_claude_parses_successful_json(monkeypatch):
+    response = json.dumps({"result": json.dumps({
+        "activities": ["Refactored X", "Added tests for Y"],
+    })})
+    with patch("subprocess.run", return_value=_mock_claude_response(response)):
+        activities, err = summarizer.run_claude("some prompt", model="haiku")
+    assert err is None
+    assert activities == ["Refactored X", "Added tests for Y"]
+
+
+def test_run_claude_constructs_argv_correctly(monkeypatch):
+    response = json.dumps({"result": json.dumps({"activities": ["A"]})})
+    with patch("subprocess.run", return_value=_mock_claude_response(response)) as m:
+        summarizer.run_claude("hello", model="haiku")
+    argv = m.call_args[0][0]
+    assert argv[0] == "claude"
+    assert "-p" in argv
+    assert "hello" in argv
+    assert "--model" in argv and "haiku" in argv
+    assert "--no-session-persistence" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--output-format" in argv and "json" in argv
+    assert "--system-prompt" in argv
+
+
+def test_run_claude_handles_file_not_found(monkeypatch):
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        activities, err = summarizer.run_claude("hi", model="haiku")
+    assert activities is None
+    assert err == "claude_not_installed"
+
+
+def test_run_claude_handles_timeout(monkeypatch):
+    with patch("subprocess.run",
+               side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=60)):
+        activities, err = summarizer.run_claude("hi", model="haiku")
+    assert activities is None
+    assert err == "timeout"
+
+
+def test_run_claude_handles_nonzero_exit(monkeypatch):
+    bad = MagicMock(returncode=1, stdout="", stderr="auth failed")
+    with patch("subprocess.run", return_value=bad):
+        activities, err = summarizer.run_claude("hi", model="haiku")
+    assert activities is None
+    assert err.startswith("cli_error:")
+    assert "auth failed" in err
+
+
+def test_run_claude_handles_invalid_json(monkeypatch):
+    with patch("subprocess.run",
+               return_value=_mock_claude_response("not json at all")):
+        activities, err = summarizer.run_claude("hi", model="haiku")
+    assert activities is None
+    assert err == "parse_error"
+
+
+def test_run_claude_handles_missing_activities_key(monkeypatch):
+    response = json.dumps({"result": json.dumps({"unrelated": "field"})})
+    with patch("subprocess.run", return_value=_mock_claude_response(response)):
+        activities, err = summarizer.run_claude("hi", model="haiku")
+    assert activities is None
+    assert err == "parse_error"

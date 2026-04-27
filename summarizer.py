@@ -172,3 +172,47 @@ def rank_cells_by_cost(db_path, max_cells=None, percentile=None):
     eager = [item for item in items if item[2] >= threshold]
     eager.sort(key=lambda c: -c[2])
     return eager[:max_cells]
+
+
+def run_claude(prompt_text, model=None, timeout=SUBPROCESS_TIMEOUT):
+    """
+    Invoke `claude -p` with the given prompt text and structured-output schema.
+    Returns (activities_list, None) on success or (None, error_code) on failure.
+    Never raises.
+    """
+    if model is None:
+        model = os.environ.get("SUMMARY_MODEL", DEFAULT_MODEL)
+    argv = [
+        "claude", "-p", prompt_text,
+        "--model", model,
+        "--output-format", "json",
+        "--json-schema", json.dumps(SUMMARY_SCHEMA),
+        "--no-session-persistence",
+        "--disable-slash-commands",
+        "--system-prompt", SYSTEM_PROMPT,
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None, "claude_not_installed"
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    if proc.returncode != 0:
+        first_err_line = (proc.stderr or "").strip().splitlines()
+        msg = first_err_line[0] if first_err_line else f"exit {proc.returncode}"
+        return None, f"cli_error: {msg}"
+    try:
+        outer = json.loads(proc.stdout)
+        # `claude -p --output-format json` returns {"result": "<inner JSON string>"}
+        inner_raw = outer.get("result")
+        if not isinstance(inner_raw, str):
+            return None, "parse_error"
+        inner = json.loads(inner_raw)
+        activities = inner.get("activities")
+        if not isinstance(activities, list) or not activities:
+            return None, "parse_error"
+        return [str(a) for a in activities], None
+    except (json.JSONDecodeError, AttributeError):
+        return None, "parse_error"
