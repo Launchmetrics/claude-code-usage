@@ -338,5 +338,99 @@ def test_get_dashboard_data_handles_custom_range(tmp_path):
     assert "sessions_all" in data
 
 
+def test_api_daily_summaries_returns_cached_cells(tmp_path, monkeypatch):
+    import dashboard, summarizer
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+
+    # Seed two turns and two cached summaries for 2026-04-25
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        INSERT INTO turns (session_id, timestamp, model, input_tokens, cwd)
+        VALUES ('s1', '2026-04-25T10:00:00Z', 'claude-haiku-4-5', 1000000, '/p/A')
+    """)
+    for cwd, acts, cost in [
+        ("/p/A", ["Did A1", "Did A2"], 1.5),
+        ("/p/B", ["Did B"], 0.5),
+    ]:
+        conn.execute("""
+            INSERT INTO daily_summaries
+              (summary_date, project_path, prompt_hash, activities, cost_usd, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, ("2026-04-25", cwd, "h", json.dumps(acts), cost, 0.0))
+    conn.commit()
+    conn.close()
+
+    # Mock summarize_cell so the lazy path doesn't actually call claude
+    monkeypatch.setattr(
+        summarizer, "summarize_cell",
+        lambda **kw: {"activities": None, "cached": False, "error": "stub"},
+    )
+
+    response = dashboard.get_daily_summaries("2026-04-25", db_path=db,
+                                              projects_dirs=[tmp_path])
+    assert response["date"] == "2026-04-25"
+    cells_by_proj = {c["project"]: c for c in response["cells"]}
+    assert cells_by_proj["/p/A"]["activities"] == ["Did A1", "Did A2"]
+    assert cells_by_proj["/p/A"]["error"] is None
+    assert cells_by_proj["/p/B"]["activities"] == ["Did B"]
+
+
+def test_api_daily_summaries_triggers_lazy_summarization(tmp_path, monkeypatch):
+    import dashboard, summarizer
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    # One turn but no cached summary → triggers lazy path
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        INSERT INTO turns (session_id, timestamp, model, input_tokens, cwd)
+        VALUES ('s1', '2026-04-25T10:00:00Z', 'claude-haiku-4-5', 1000000, '/p/A')
+    """)
+    conn.commit()
+    conn.close()
+
+    called = {"count": 0}
+    def fake_summarize(date, cwd, cost_usd, db_path, projects_dirs, model=None):
+        called["count"] += 1
+        return {"activities": ["lazy result"], "cached": False, "error": None}
+    monkeypatch.setattr(summarizer, "summarize_cell", fake_summarize)
+
+    response = dashboard.get_daily_summaries("2026-04-25", db_path=db,
+                                              projects_dirs=[tmp_path])
+    assert called["count"] == 1
+    cells_by_proj = {c["project"]: c for c in response["cells"]}
+    assert cells_by_proj["/p/A"]["activities"] == ["lazy result"]
+
+
+def test_api_daily_summaries_endpoint_serves_json(tmp_path, monkeypatch):
+    """Smoke test the actual HTTP route returns JSON."""
+    import dashboard, summarizer
+    from http.server import HTTPServer
+    import urllib.request
+
+    db = tmp_path / "u.db"
+    conn = get_db(db); init_db(conn); conn.close()
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    monkeypatch.setattr(
+        summarizer, "summarize_cell",
+        lambda **kw: {"activities": None, "cached": False, "error": "stub"},
+    )
+
+    server = HTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/daily-summaries?date=2026-04-25",
+        ) as r:
+            body = json.loads(r.read())
+        assert body["date"] == "2026-04-25"
+        assert body["cells"] == []
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

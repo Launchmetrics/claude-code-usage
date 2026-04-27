@@ -143,6 +143,89 @@ def get_dashboard_data(db_path=DB_PATH):
     }
 
 
+def get_daily_summaries(date, db_path=None, projects_dirs=None):
+    """
+    Return cached + lazily-summarized cells for a single date. Triggers
+    summarize_cell synchronously for any (date, cwd) with activity but no
+    cached summary. Relies on ThreadingHTTPServer so other requests aren't
+    blocked while a lazy summary runs.
+    """
+    import summarizer, scanner
+    if db_path is None:
+        db_path = DB_PATH
+    if projects_dirs is None:
+        projects_dirs = scanner.DEFAULT_PROJECTS_DIRS
+    if not _date_is_valid(date):
+        return {"date": date, "cells": [], "error": "invalid_date"}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT cwd, model,
+                   SUM(input_tokens) AS inp,
+                   SUM(output_tokens) AS out,
+                   SUM(cache_read_tokens) AS cr,
+                   SUM(cache_creation_tokens) AS cw
+            FROM turns
+            WHERE substr(timestamp, 1, 10) = ?
+              AND cwd IS NOT NULL AND cwd != ''
+            GROUP BY cwd, model
+        """, (date,)).fetchall()
+        cell_costs = {}
+        from cli import calc_cost
+        for r in rows:
+            cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cw"] or 0)
+            cell_costs[r["cwd"]] = cell_costs.get(r["cwd"], 0.0) + cost
+
+        cached_rows = conn.execute("""
+            SELECT project_path, activities
+            FROM daily_summaries
+            WHERE summary_date = ?
+        """, (date,)).fetchall()
+        cached = {r["project_path"]: json.loads(r["activities"])
+                  for r in cached_rows}
+
+        eager_set = {(d, c) for d, c, _ in summarizer.rank_cells_by_cost(db_path)}
+    finally:
+        conn.close()
+
+    # Include all cwds that either have turns or a cached summary for this date
+    all_cwds = sorted(set(cell_costs.keys()) | set(cached.keys()))
+
+    cells = []
+    for cwd in all_cwds:
+        cost = cell_costs.get(cwd, 0.0)
+        is_eager = (date, cwd) in eager_set
+        if cwd in cached:
+            cells.append({
+                "project": cwd, "cost": round(cost, 4),
+                "activities": cached[cwd], "error": None, "eager": is_eager,
+            })
+        else:
+            result = summarizer.summarize_cell(
+                date=date, cwd=cwd, cost_usd=cost,
+                db_path=db_path, projects_dirs=projects_dirs,
+            )
+            cells.append({
+                "project": cwd, "cost": round(cost, 4),
+                "activities": result["activities"],
+                "error": result["error"], "eager": is_eager,
+            })
+    return {"date": date, "cells": cells}
+
+
+def _date_is_valid(date):
+    if not isinstance(date, str) or len(date) != 10:
+        return False
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1417,6 +1500,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/data":
             data = get_dashboard_data()
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/daily-summaries":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            date = qs.get("date", [""])[0]
+            data = get_daily_summaries(date)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
